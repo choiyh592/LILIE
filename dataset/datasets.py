@@ -1,164 +1,158 @@
 import torch
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset
 import random
+import os
+import re
 
-#TODO : Refine dataset for multiple calls of random assignments!!
+class LongitudinalEEGDataset(Dataset):
+    def __init__(self, pairs_df, metadata_csv_path, embeddings_npy_path, n_draws=5):
+        """
+        Args:
+            pairs_df: Dataframe defining before/after splits.
+            metadata_csv_path: Path to the CSV describing the embeddings.
+            embeddings_npy_path: Path to the pre-computed .npy embeddings.
+            n_draws: Number of random instance pairs to draw per patient date per epoch.
+        """
+        self.n_draws = n_draws
+        
+        # 1. Load embeddings using memory mapping
+        # mmap_mode='r' prevents loading the entire dataset into RAM at once, 
+        # which is crucial for large EEG embedding files.
+        self.embeddings = np.load(embeddings_npy_path, mmap_mode='r')
 
-class LongitudinalDataset(Dataset):
-    def __init__(self):
-        super().__init__()
+        # 2. Dynamically parse the metadata
+        meta_df = pd.read_csv(metadata_csv_path)
+        
+        # Extract ID and date elements dynamically from "ID_YYYY_MM_DD_..."
+        parsed_meta = meta_df['group_name'].str.split('_', expand=True)
+        meta_df['ID'] = parsed_meta[0].astype(int)
+        meta_df['Year'] = parsed_meta[1].astype(int)
+        meta_df['Month'] = parsed_meta[2].astype(int)
+        meta_df['Day'] = parsed_meta[3].astype(int)
 
-        # Placeholders
-        self.all_pairs = []
-        self.before_embs = []
-        self.after_embs = []
+        # Create a dictionary mapping the tuple (ID, Year, Month, Day) -> list of dataset_idxs
+        self.date_to_indices = meta_df.groupby(['ID', 'Year', 'Month', 'Day'])['dataset_idx'].apply(list).to_dict()
 
-    @classmethod
-    def create_instance_ids(num_patients, num_samples_per_patient):
-        pass
+        # 3. Process pairs and filter for valid ones
+        self.valid_pairs = []
+
+        for _, row in pairs_df.iterrows():
+            pid = int(row['ID'])
+            # Cast to int to ensure "04" and "4" map to the same key
+            before_key = (pid, int(row['Year_Before']), int(row['Month_Before']), int(row['Day_Before']))
+            after_key = (pid, int(row['Year_After']), int(row['Month_After']), int(row['Day_After']))
+
+            # Only append to our active set if BOTH dates have corresponding instances in the metadata
+            if before_key in self.date_to_indices and after_key in self.date_to_indices:
+                self.valid_pairs.append((before_key, after_key))
 
     def __len__(self):
-        # The total number of combinations across all subjects
-        return len(self.all_pairs)
+        # Epoch length equals the number of unique valid pairs multiplied by 'n' draws
+        return len(self.valid_pairs) * self.n_draws
+
+    def __getitem__(self, idx):
+        # 1. Map the global index to a specific patient pair
+        pair_idx = idx // self.n_draws
+        before_key, after_key = self.valid_pairs[pair_idx]
+
+        # 2. Randomly select one instance for 'before' and one for 'after'
+        before_instance_idx = random.choice(self.date_to_indices[before_key])
+        after_instance_idx = random.choice(self.date_to_indices[after_key])
+
+        # Convert numpy arrays to PyTorch tensors
+        embed_before = torch.tensor(self.embeddings[before_instance_idx], dtype=torch.float32)
+        embed_after = torch.tensor(self.embeddings[after_instance_idx], dtype=torch.float32)
+
+        # 3. Randomly assign label and output order
+        label = random.randint(0, 1)
+
+        if label == 1:
+            # Flipped time order
+            seq_1, seq_2 = embed_after, embed_before
+        else:
+            # Correct time order
+            seq_1, seq_2 = embed_before, embed_after
+
+        return seq_1, seq_2, torch.tensor(label, dtype=torch.long)
+
+def get_fold_splits(directory, test_idx):
+    """
+    Merges all longitudinal_pairs_fold_n.csv files except for test_idx.
     
-    def __getitem__(self, idx):
-        before_idx, after_idx = self.all_pairs[idx]
-        label = self.labels[idx]
+    Args:
+        directory (str): Path to the folder containing the CSVs.
+        test_idx (int): The fold number to be used as the test set.
         
-        # Determine order based on the fixed label
-        if label == 1:
-            x_0, x_1 = self.before_embs[before_idx], self.after_embs[after_idx]
-        else:
-            x_0, x_1 = self.after_embs[after_idx], self.before_embs[before_idx]
+    Returns:
+        tuple: (train_df, test_df)
+    """
+    all_files = os.listdir(directory)
+    
+    # Pattern to match the specific naming convention and extract the fold number
+    pattern = re.compile(r'longitudinal_pairs_fold_(\d+)\.csv')
+    
+    train_dfs = []
+    test_df = None
+    
+    for filename in all_files:
+        match = pattern.match(filename)
+        if match:
+            current_fold_idx = int(match.group(1))
+            file_path = os.path.join(directory, filename)
             
-        return (
-            torch.from_numpy(x_0).float(), 
-            torch.from_numpy(x_1).float(), 
-            torch.tensor(label, dtype=torch.long)
-        )
-
-class RandomLongitudinalDataset(LongitudinalDataset):
-    def __init__(self, before_path, after_path, subject_ids, len_multiplier=5):
-        """
-        Args:
-            before_path (str): Path to 'before_embeddings.npy'
-            after_path (str): Path to 'after_embeddings.npy'
-            subject_ids (np.array or list): A list of IDs identifying the subject 
-                                            for each row (e.g., [S1, S1, S2, S2...])
-        """
-        self.before_embs = np.load(before_path)
-        self.after_embs = np.load(after_path)
-        self.subject_ids = np.array(subject_ids)
-        
-        # Create a mapping: subject_id -> list of indices belonging to them
-        self.subject_map = {}
-        for idx, s_id in enumerate(self.subject_ids):
-            if s_id not in self.subject_map:
-                self.subject_map[s_id] = []
-            self.subject_map[s_id].append(idx)
-            
-        self.unique_ids = list(self.subject_map.keys())
-
-    # Override for stochastic draws
-    def __getitem__(self, idx):
-        # 1. Identify the subject for the current index
-        current_subject = self.subject_ids[idx]
-        
-        # 2. Get all possible indices for this specific subject
-        subject_indices = self.subject_map[current_subject]
-        
-        # 3. Randomly select an index from the 'after' set for this same subject
-        # This provides the "longitudinal" variety
-        random_after_idx = random.choice(subject_indices)
-        
-        emb_before = self.before_embs[idx]
-        emb_after = self.after_embs[random_after_idx]
-        
-        # 4. Determine order (1: Before->After, 0: After->Before)
-        label = np.random.randint(0, 2)
-        
-        if label == 1:
-            x_0, x_1 = emb_before, emb_after
-        else:
-            x_0, x_1 = emb_after, emb_before
-            
-        return (
-            torch.from_numpy(x_0).float(), 
-            torch.from_numpy(x_1).float(), 
-            torch.tensor(label, dtype=torch.long)
-        )
-
-class AllPairsLongitudinalDataset(LongitudinalDataset):
-    def __init__(self, before_path, after_path, subject_ids):
-        """
-        Args:
-            before_path (str): Path to 'before_embeddings.npy'
-            after_path (str): Path to 'after_embeddings.npy'
-            subject_ids (np.array or list): IDs identifying the subject for each row
-        """
-        self.before_embs = np.load(before_path)
-        self.after_embs = np.load(after_path)
-        self.subject_ids = np.array(subject_ids)
-        
-        # 1. Map each subject ID to their list of indices
-        self.subject_map = {}
-        for idx, s_id in enumerate(self.subject_ids):
-            if s_id not in self.subject_map:
-                self.subject_map[s_id] = []
-            self.subject_map[s_id].append(idx)
-            
-        # 2. Pre-compute all possible (before_idx, after_idx) pairs for each subject
-        self.all_pairs = []
-        self.subject_id_map = []
-        for s_id, indices in self.subject_map.items():
-            # This creates a Cartesian product of the subject's indices
-            # Result: every 'before' sample paired with every 'after' sample for this ID
-            for b_idx in indices:
-                for a_idx in indices:
-                    self.all_pairs.append((b_idx, a_idx))
-                    self.subject_id_map.append(s_id)
-
-class KPairsLongitudinalDataset(LongitudinalDataset):
-    def __init__(self, before_path, after_path, subject_ids, k_pairs=8, seed=42):
-        """
-        Args:
-            before_path (str): Path to 'before_embeddings.npy'
-            after_path (str): Path to 'after_embeddings.npy'
-            subject_ids (list): IDs for each row
-            k_pairs (int): Number of random pairs to draw per subject
-        """
-        self.before_embs = np.load(before_path)
-        self.after_embs = np.load(after_path)
-        self.subject_ids = np.array(subject_ids)
-        self.k_pairs = k_pairs
-        
-        # 1. Map each subject ID to their indices
-        self.subject_map = {}
-        for idx, s_id in enumerate(self.subject_ids):
-            if s_id not in self.subject_map:
-                self.subject_map[s_id] = []
-            self.subject_map[s_id].append(idx)
-            
-        # 2. Generate Fixed-K pairs per subject
-        self.all_pairs = []
-        self.subject_id_map = []
-        random.seed(seed)
-        
-        for s_id, indices in self.subject_map.items():
-            # Generate all possible combinations for this subject
-            possible_pairs = [(b, a) for b in indices for a in indices]
-            
-            # If they have fewer than k possible pairs, take all (or oversample)
-            if len(possible_pairs) <= self.k_pairs:
-                sampled = possible_pairs
+            if current_fold_idx == test_idx:
+                test_df = pd.read_csv(file_path)
             else:
-                sampled = random.sample(possible_pairs, self.k_pairs)
-            
-            self.all_pairs.extend(sampled)
-            self.subject_id_map.extend([s_id] * len(sampled))
+                train_dfs.append(pd.read_csv(file_path))
+    
+    # Check if we actually found the test index
+    if test_df is None:
+        raise ValueError(f"Fold index {test_idx} not found in {directory}")
 
-        # 3. Pre-assign deterministic labels to avoid "moving target" validation
-        np.random.seed(seed)
-        self.labels = np.random.randint(0, 2, size=len(self.all_pairs))
+    # Merge all other folds into one training dataframe
+    train_df = pd.concat(train_dfs, ignore_index=True)
+    
+    return train_df, test_df
 
+def create_train_test_splits(split_csv_dir, metadata_csv_path, embeddings_npy_path, batch_size=32, num_workers=4, test_idx=0, n_draws=5):
+
+    train_df, test_df = get_fold_splits(split_csv_dir, test_idx)
+
+    train_dataset = LongitudinalEEGDataset(
+        pairs_df=train_df,
+        metadata_csv_path=metadata_csv_path,
+        embeddings_npy_path=embeddings_npy_path,
+        n_draws=n_draws
+    )
+
+    test_dataset = LongitudinalEEGDataset(
+        pairs_df=test_df,
+        metadata_csv_path=metadata_csv_path,
+        embeddings_npy_path=embeddings_npy_path,
+        n_draws=n_draws
+    )
+
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,       
+        pin_memory=True      
+    )
+
+    test_loader = DataLoader(
+        dataset=test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,       
+        pin_memory=True      
+    )
+
+    #     Example iteration
+    #     for batch_idx, (seq_1, seq_2, labels) in enumerate(train_loader):
+    #         print(f"Batch {batch_idx}: Seq1 shape {seq_1.shape}, Seq2 shape {seq_2.shape}, Labels shape {labels.shape}")
+    #         break
+
+    return train_loader, test_loader

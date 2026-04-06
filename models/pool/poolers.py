@@ -7,8 +7,8 @@ from einops import rearrange
 class AttentivePoolingWithLearnedQueries(nn.Module):
     def __init__(
         self,
-        input_dim: int = 8,
-        embed_dim: int = 768,
+        input_dim: int = 256,
+        embed_dim: int = 256,
         num_heads: int = 8,
     ):
         super().__init__()
