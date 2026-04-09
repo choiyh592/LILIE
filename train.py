@@ -45,8 +45,8 @@ def parse_args():
     parser.add_argument("--clf_method", type=str, default="NN", choices=["NN", "Linear"])
 
     # --- Trainer Args ---
-    parser.add_argument("--max_epochs", type=int, default=100)
-    parser.add_argument("--start_saving_epoch", type=int, default=10, help="Epoch to start checkpointing")
+    parser.add_argument("--max_epochs", type=int, default=1000)
+    parser.add_argument("--start_saving_epoch", type=int, default=20, help="Epoch to start checkpointing")
     parser.add_argument("--accelerator", type=str, default="gpu", help="cpu, gpu, or auto")
     parser.add_argument("--devices", type=str, default="auto", help="Number of devices or 'auto'")
 
@@ -87,7 +87,7 @@ if __name__ == "__main__":
         monitor="val_auroc",
         mode="max",
         save_top_k=1,
-        filename="best-eeg-{epoch:02d}-{val_auroc:.2f}"
+        filename="best-eeg-{epoch:02d}-{val_auroc:.4f}-{val_acc:.4f}"
     )
 
     trainer = L.Trainer(

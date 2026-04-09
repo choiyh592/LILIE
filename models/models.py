@@ -75,6 +75,6 @@ class LILIE(L.LightningModule):
         return self.pooler(x_0, x_1)
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=1e-5, weight_decay=0.075)
+        optimizer = optim.AdamW(self.parameters(), lr=1e-5, weight_decay=0.0005)
         return optimizer
 
