@@ -15,7 +15,7 @@ class LILIE(L.LightningModule):
         super().__init__()
         
         if pool_method == "Attentive":
-            self.pooler = AttentiveDelta(input_dim=256, embed_dim=256, num_heads=8)
+            self.pooler = AttentiveDelta(input_dim=input_dim, embed_dim=embedding_size, num_heads=8)
         elif pool_method == "NN":
             self.pooler = NNDelta(input_shape = (0, 32, 256), embed_dim = 256)
         elif pool_method == "Linear":
@@ -28,7 +28,7 @@ class LILIE(L.LightningModule):
         if clf_method == "Linear":
             self.clf = nn.Linear(embedding_size, num_classes)
         elif clf_method == "NN":
-            self.clf = Mlp(in_features=embedding_size, hidden_features=embedding_size, out_features=num_classes, act_layer=nn.GELU, drop=0.15)
+            self.clf = Mlp(in_features=embedding_size, hidden_features=embedding_size * 2, out_features=num_classes, act_layer=nn.GELU, drop=0.15)
 
         self.train_acc = BinaryAccuracy()
         self.val_acc = BinaryAccuracy()
