@@ -35,7 +35,7 @@ def parse_args():
     # --- DataLoader Args ---
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--test_idx", type=int, default=0, help="Index for cross-validation split. Starts from 1")
+    parser.add_argument("--test_idx", type=int, default=1, help="Index for cross-validation split. Starts from 1")
     parser.add_argument("--n_draws", type=int, default=5)
 
     # --- Model Hyperparameters ---
