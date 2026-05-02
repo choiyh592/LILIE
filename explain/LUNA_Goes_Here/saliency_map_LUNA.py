@@ -204,8 +204,8 @@ if __name__ == "__main__":
     print(f"Calculating gradients for target class {args.target_class}...")
     
     # Conditional flip based on target class
-    if args.target_class == 0:
-        print("Target class is 0: Flipping eeg_0 and eeg_1 for model inference.")
+    if args.target_class == 1:
+        print("Target class is 1: Flipping eeg_0 and eeg_1 for model inference.")
         # We pass eeg_1 as the first input, and eeg_0 as the second.
         # The function returns (logits, cam_A, cam_B), so we unpack them as (logits, cam_1, cam_0)
         # to ensure the heatmaps correctly match the original timepoints during plotting.
@@ -217,7 +217,7 @@ if __name__ == "__main__":
             args.target_class
         )
     else:
-        print("Target class is 1: Keeping eeg_0 and eeg_1 in original order.")
+        print("Target class is 0: Keeping eeg_0 and eeg_1 in original order.")
         # Standard order
         logits, cam_0, cam_1 = compute_eeg_saliency(
             combined_model, 
