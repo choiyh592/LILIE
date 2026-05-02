@@ -14,7 +14,7 @@ class AttentivePoolingWithLearnedQueries(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.embed_dim = int(embed_dim) 
-        self.reconstruction_shape = self.input_dim
+        self.in_proj = nn.Linear(input_dim, embed_dim) if input_dim != embed_dim else nn.Identity()
         self.decoder_attn = nn.MultiheadAttention(self.embed_dim, num_heads, batch_first=True, dropout=0.15)
         self.decoder_ffn = Mlp(in_features=self.embed_dim, hidden_features=int(self.embed_dim*4), out_features=embed_dim, act_layer=nn.GELU, drop=0.15)
         self.learned_agg = nn.Parameter(torch.randn(1, 1, self.embed_dim), requires_grad=True)
@@ -28,6 +28,7 @@ class AttentivePoolingWithLearnedQueries(nn.Module):
             channel_embeddings: [B, in_chans, embed_dim]
         """
         # B, num_patches, embed_dim = x.shape
+        x = self.in_proj(x)
         decoder_queries = self.learned_agg.repeat(x.shape[0], 1, 1)
 
         x = self.decoder_attn(query=decoder_queries, key=x, value=x)[0]
