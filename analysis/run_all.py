@@ -17,6 +17,7 @@ Run:  python -m analysis.run_all --config analysis/config.yaml
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .config import Config, load_config, add_arg
@@ -31,6 +32,26 @@ def _ensure_repo_on_path(config: Config):
     repo_root = config.path("repo_root")
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
+
+
+def _clinical_available(config: Config) -> bool:
+    p = config.path("paths", "clinical_csv")
+    return bool(p) and os.path.exists(p)
+
+
+def _raw_eeg_available(config: Config) -> bool:
+    p = config.path("paths", "raw_eeg_dir")
+    if not p or not os.path.exists(p):
+        return False
+    if os.path.isdir(p):
+        return len(os.listdir(p)) > 0
+    return True                                  # a single HDF5 file
+
+
+def _resolve(config: Config, key: str, auto_default: bool) -> bool:
+    """run.<key> may be true/false to force, or null/absent to auto-detect."""
+    val = config.get("run", {}).get(key, None)
+    return auto_default if val is None else bool(val)
 
 
 def run(config: Config, start_from: str = "assemble") -> dict:
@@ -58,15 +79,43 @@ def run(config: Config, start_from: str = "assemble") -> dict:
         print("=" * 68)
         return gate
 
-    # Gate routing (modules 4-8 / graded_score are scaffolded).
+    # Gate routing.
     if invariants.should_proceed(gate):
         print("\n[run_all] gate: PROCEED -> clustering branch")
         from . import cluster, stability, qeeg, phenotype_stats, report
-        for name, mod in [("cluster", cluster), ("stability", stability),
-                          ("qeeg", qeeg), ("phenotype_stats", phenotype_stats),
-                          ("report", report)]:
-            print(f"\n=== {name} ===")
-            mod.main(config)
+
+        print("\n=== Module 4: cluster ===")
+        cluster.main(config)
+        print("\n=== Module 5: stability ===")
+        stability.main(config)
+
+        # Module 6 (QEEG/FC): needs raw EEG. Auto-skip if unavailable.
+        run_qeeg = _resolve(config, "run_qeeg", _raw_eeg_available(config))
+        qeeg_ok = False
+        if run_qeeg:
+            print("\n=== Module 6: qeeg (functional connectivity) ===")
+            try:
+                qeeg.main(config)
+                qeeg_ok = True
+            except Exception as e:  # noqa: BLE001
+                print(f"[run_all] module 6 (qeeg) failed/skipped: {type(e).__name__}: {e}")
+        else:
+            print("\n[run_all] skipping module 6 (qeeg): no raw EEG at "
+                  f"{config.path('paths', 'raw_eeg_dir')}")
+
+        # Module 7 (phenotype stats): needs the clinical covariates AND QEEG features.
+        run_pheno = _resolve(config, "run_phenotype", _clinical_available(config))
+        if run_pheno and qeeg_ok:
+            print("\n=== Module 7: phenotype_stats ===")
+            phenotype_stats.main(config)
+        else:
+            why = "no clinical table" if not run_pheno else "QEEG features not produced"
+            print(f"\n[run_all] skipping module 7 (phenotype_stats): {why}. "
+                  "The covariate-adjusted comparison needs both the clinical "
+                  "covariates and QEEG features.")
+
+        print("\n=== Module 8: report ===")
+        report.main(config)
     else:
         print("\n[run_all] gate: STOP -> graded_score branch")
         from . import graded_score
