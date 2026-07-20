@@ -50,8 +50,15 @@ def main(config: Config) -> str:
                         "PC1": X[:, 0], "PC2": X[:, 1] if X.shape[1] > 1 else 0.0})
     cc = config["cluster"]
     method = str(cc.get("outlier_method", "lof"))
+    # Detect on the SAME space clustering uses: directional (unit-normalized PC
+    # scores) when metric=cosine, else the raw PC scores. Otherwise this
+    # diagnostic would flag magnitude fliers the directional clustering ignores.
+    Xdet = X.copy()
+    if str(cc.get("metric", "euclidean")) == "cosine":
+        nrm = np.linalg.norm(Xdet, axis=1, keepdims=True); nrm[nrm == 0] = 1.0
+        Xdet = Xdet / nrm
     mask, score, cutoff = outliers.outlier_mask(
-        X, method=method, quantile=float(cc.get("outlier_quantile", 0.975)),
+        Xdet, method=method, quantile=float(cc.get("outlier_quantile", 0.975)),
         n_neighbors=int(cc.get("outlier_n_neighbors", 20)), seed=seed)
     xdf["outlier_score"] = score
     xdf["is_outlier"] = mask

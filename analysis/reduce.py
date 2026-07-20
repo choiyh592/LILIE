@@ -66,16 +66,28 @@ def main(config: Config) -> dict:
         sd[sd == 0] = 1.0
         X = (X - mu) / sd
 
-    # Directional mode: L2-normalize each delta onto the unit hypersphere so the
-    # analysis is about the DIRECTION of change (what kind), not the magnitude
-    # (how much). Removes the magnitude confound (dt, noise) and the extreme-norm
-    # outliers that otherwise dominate PCA. The gate then tests for directional
-    # structure.
-    if str(r.get("normalize", "none")) == "unit":
+    # Directional normalization (per-vector) so the analysis is about the
+    # DIRECTION of change, not the magnitude. Removes the magnitude confound
+    # (dt, noise) and the extreme-norm outliers that dominate PCA.
+    #   "unit" - L2-normalize onto the unit hypersphere (direction only).
+    #   "zvec" - per-vector z-score: center each delta AND scale to unit
+    #            variance. Like L2 but also removes each vector's mean component
+    #            (a per-vector DC offset). Alternative directional normalization.
+    #   "none" - keep magnitude (magnitude-based analysis).
+    # Note: per-DIMENSION z-scoring above is applied regardless; this is the
+    # separate per-vector step.
+    norm_mode = str(r.get("normalize", "none"))
+    if norm_mode == "unit":
         nrm = np.linalg.norm(X, axis=1, keepdims=True)
         nrm[nrm == 0] = 1.0
         X = X / nrm
-        print("[reduce] directional mode: unit-normalized deltas before PCA")
+        print("[reduce] directional mode: L2-normalized deltas before PCA")
+    elif norm_mode == "zvec":
+        mu = X.mean(axis=1, keepdims=True)
+        sd = X.std(axis=1, keepdims=True)
+        sd[sd == 0] = 1.0
+        X = (X - mu) / sd
+        print("[reduce] directional mode: per-vector z-normalized deltas before PCA")
 
     max_comp = r["max_components"] or min(X.shape[0], X.shape[1])
     max_comp = int(min(max_comp, X.shape[0], X.shape[1]))

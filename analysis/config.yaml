@@ -104,11 +104,14 @@ delta:
 # -----------------------------------------------------------------------------
 reduce:
   zscore: true                    # z-score each embedding dim across progressions
-  # Directional analysis: "unit" L2-normalizes each delta onto the unit sphere
-  # BEFORE PCA, so the pipeline clusters by DIRECTION of change (not magnitude).
-  # This removes the dt/noise magnitude confound and the extreme-norm outliers.
-  # Set "none" to revert to magnitude-based analysis.
-  normalize: unit                 # none | unit
+  # Per-VECTOR normalization BEFORE PCA, so the pipeline clusters by DIRECTION of
+  # change, not magnitude (removes the dt/noise magnitude confound + extreme-norm
+  # outliers). Per-DIMENSION z-scoring (zscore above) is applied regardless.
+  #   unit - L2-normalize each delta onto the unit sphere (direction only)
+  #   zvec - per-vector z-score: center each delta + scale to unit variance
+  #          (like L2 but also strips each vector's mean/DC component)
+  #   none - keep magnitude (magnitude-based analysis)
+  normalize: unit                 # none | unit | zvec
   max_components: null            # null = min(n_progressions, n_dims)
   gate:
     min_components_above_floor: 2 # >=2 signal components -> proceed
