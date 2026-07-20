@@ -32,7 +32,7 @@ def _cfg(root):
     }, config_dir=root)
 
 
-def _make_pca_and_progressions(cfg, root, seed=0):
+def _make_pca_and_progressions(cfg, root, seed=0, n_out=0):
     rng = np.random.default_rng(seed)
     D, per = 5, 20
     centers = np.array([[6, 0, 0, 0, 0], [-6, 5, 0, 0, 0], [0, -6, 4, 0, 0]], float)
@@ -41,6 +41,10 @@ def _make_pca_and_progressions(cfg, root, seed=0):
         X.append(cen + rng.normal(scale=0.7, size=(per, D)))
         cl += [ci] * per
     X = np.vstack(X)
+    # inject extreme outliers far from the three clusters
+    for i in range(n_out):
+        pt = np.zeros(D); pt[0] = (40 + 10 * i) * (-1) ** i; pt[1] = 30
+        X = np.vstack([X, pt]); cl.append(-99)
     N = X.shape[0]
     prog_ids = np.array([f"p{i:03d}" for i in range(N)], dtype=object)
     # patients: mostly 1 progression, some share 2 (kept within a cluster)
@@ -89,6 +93,64 @@ def test_cluster_stability_report_no_clinical():
         md = open(cfg.out("report.md")).read()
         assert "Clinical covariates absent" in md   # graceful clinical-skip note
         assert "QEEG/FC not computed" in md
+
+
+def test_outlier_mask_flags_extremes():
+    from analysis import outliers
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(50, 3))
+    X = np.vstack([X, [20, 20, 20], [-25, 0, 0]])       # 2 clear outliers
+    # LOF (default): density-based, multimodal-safe
+    mask, score, _ = outliers.outlier_mask(X, method="lof", seed=0)
+    assert mask[-1] and mask[-2]                         # both extremes flagged
+    # LOF must NOT wipe a whole minority cluster: on 3 balanced clusters + far
+    # points, only the far points should be flagged.
+    c = np.vstack([rng.normal([8, 0, 0], 0.5, (20, 3)),
+                   rng.normal([-8, 6, 0], 0.5, (20, 3)),
+                   rng.normal([0, -8, 5], 0.5, (20, 3)),
+                   np.array([[40, 30, 0], [-45, 30, 0]])])
+    m2, _, _ = outliers.outlier_mask(c, method="lof", seed=0)
+    assert m2[-1] and m2[-2]                             # far points flagged
+    assert m2[:60].sum() <= 6                            # clusters largely intact
+
+
+def test_cluster_marks_outliers_and_clusters_core():
+    with tempfile.TemporaryDirectory() as root:
+        cfg = _cfg(root)
+        cfg.raw["cluster"]["outlier_handling"] = "mark_separately"
+        cfg.raw["cluster"]["outlier_quantile"] = 0.975
+        _make_pca_and_progressions(cfg, root, n_out=3)   # 60 core + 3 outliers
+        cluster.main(cfg)
+        L = np.load(cfg.out("labels.npz"), allow_pickle=True)
+        lab = L["cluster"]
+        # the 3 injected extremes (last rows) are marked -1
+        assert (lab[-3:] == -1).all()
+        # core still clustered (>=2 real clusters), outliers excluded
+        assert len(set(lab[lab >= 0])) >= 2
+        # stability runs on core only without error
+        stability.main(cfg)
+        stab = io.read_json(cfg.out("stability.json"))
+        assert stab["k"] == len(set(lab[lab >= 0]))
+
+
+def test_directional_recovers_direction_groups():
+    """Two change directions 30 deg apart with a wide magnitude spread: magnitude
+    k-means splits by radius and misses the directions; directional recovers them."""
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import adjusted_rand_score
+    from analysis.cluster import _unit
+    rng = np.random.default_rng(0)
+    X, true = [], []
+    for i, a in enumerate([np.deg2rad(80), np.deg2rad(110)]):
+        dv = np.array([np.cos(a), np.sin(a)])
+        for _ in range(40):
+            mag = rng.uniform(0.2, 12.0)                 # wide magnitude range
+            X.append(dv * mag + rng.normal(0, 0.05, 2)); true.append(i)
+    X, true = np.array(X), np.array(true)
+    ari_eu = adjusted_rand_score(true, KMeans(2, n_init=10, random_state=0).fit_predict(X))
+    ari_sp = adjusted_rand_score(true, KMeans(2, n_init=10, random_state=0).fit_predict(_unit(X)))
+    assert ari_sp > 0.9                                  # directional recovers directions
+    assert ari_sp > ari_eu + 0.3                         # and clearly beats magnitude
 
 
 def test_runall_skip_helpers():

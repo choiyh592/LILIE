@@ -73,9 +73,24 @@ def main(config: Config) -> str:
     z = np.load(config.out("X_pca.npz"), allow_pickle=True)
     X = z["X_pca"].astype(float)
     L = np.load(config.out("labels.npz"), allow_pickle=True)
-    ref = L["cluster"].astype(int)
-    patient_id = L["patient_id"]
-    k = int(L["k"])
+    ref_all = L["cluster"].astype(int)
+
+    # Match the clustering metric: in directional mode re-cluster on unit vectors.
+    if str(config["cluster"].get("metric", "euclidean")) == "cosine":
+        nrm = np.linalg.norm(X, axis=1, keepdims=True)
+        nrm[nrm == 0] = 1.0
+        X = X / nrm
+
+    # Stability is assessed on the CORE clusters only (outliers are cluster -1).
+    core = ref_all >= 0
+    n_out = int((~core).sum())
+    X = X[core]
+    ref = ref_all[core]
+    patient_id = L["patient_id"][core]
+    k = len(np.unique(ref))
+    if n_out:
+        print(f"[stability] excluding {n_out} outlier progression(s); "
+              f"assessing {k} core cluster(s).")
 
     patients = np.unique(patient_id)
     B = int(st["n_bootstrap"])
