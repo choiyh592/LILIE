@@ -92,17 +92,54 @@ def _train_fold(config: Config, test_idx: int):
         clf_method=d["clf_method"],
     )
 
+    # A100 tensor cores: trade a little float32 precision for speed (silences the
+    # Lightning tip and speeds training).
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+    # SINGLE DEVICE ONLY. This pipeline is one orchestrator script (run_all);
+    # multi-GPU DDP re-launches the whole script per process, which would re-run
+    # assemble/reduce N times and tangle the run. We train the 5 folds
+    # sequentially on one device (=> no DDP). Set delta.device_index to pin a
+    # specific GPU (cuda:N) via Trainer devices=[N].
+    accel = d["accelerator"]
+    device_index = d.get("device_index", None)
+    cuda_ok = torch.cuda.is_available()
+    if device_index is not None and str(device_index).strip() != "":
+        if cuda_ok:
+            accel, devices = "gpu", [int(device_index)]      # pin cuda:N
+            print(f"[delta] using cuda:{int(device_index)}")
+        else:
+            print(f"[delta] NOTE: device_index={device_index} set but no CUDA "
+                  f"available; using CPU.")
+            accel, devices = "cpu", 1
+    else:
+        devices = int(d["devices"]) if str(d["devices"]).isdigit() else 1
+        if devices != 1:
+            print(f"[delta] NOTE: forcing devices=1 (multi-GPU DDP unsupported for "
+                  f"this single-script pipeline; requested {d['devices']}). "
+                  f"Use delta.device_index to pick a specific GPU.")
+            devices = 1
+
     logger = CSVLogger(config.out("_lightning_logs"), name=f"fold{test_idx}")
     trainer = L.Trainer(
         logger=logger,
         max_epochs=int(d["max_epochs"]),
-        accelerator=d["accelerator"],
-        devices=d["devices"],
+        accelerator=accel,
+        devices=devices,
+        strategy="auto",
+        num_sanity_val_steps=0,
         enable_checkpointing=False,
         enable_progress_bar=False,
     )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
 
+    # Move to CPU for all subsequent inference (held-out predictions + the
+    # per-progression deltas in main), so the model and the CPU segment tensors
+    # always agree on device regardless of which GPU trained the fold.
+    model = model.to("cpu")
     # Collect held-out ordering predictions.
     model.eval()
     probs, labels = [], []
@@ -239,5 +276,11 @@ def main(config: Config) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Module 2 - temporal-order model -> deltas")
     add_arg(parser)
+    parser.add_argument("--device", type=int, default=None,
+                        help="CUDA device index (cuda:N) to train on; "
+                             "overrides config delta.device_index")
     args = parser.parse_args()
-    main(load_config(args.config))
+    cfg = load_config(args.config)
+    if args.device is not None:
+        cfg.raw.setdefault("delta", {})["device_index"] = args.device
+    main(cfg)

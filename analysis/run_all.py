@@ -79,5 +79,11 @@ if __name__ == "__main__":
     add_arg(parser)
     parser.add_argument("--from", dest="start_from", default="assemble",
                         choices=STEPS_PRE_GATE, help="Resume from this step")
+    parser.add_argument("--device", type=int, default=None,
+                        help="CUDA device index (cuda:N) for module 2 training; "
+                             "overrides config delta.device_index")
     args = parser.parse_args()
-    run(load_config(args.config), start_from=args.start_from)
+    cfg = load_config(args.config)
+    if args.device is not None:
+        cfg.raw.setdefault("delta", {})["device_index"] = args.device
+    run(cfg, start_from=args.start_from)

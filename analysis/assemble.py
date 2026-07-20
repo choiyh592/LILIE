@@ -55,9 +55,11 @@ def _load_fold_progressions(splits_dir: str, num_folds: int) -> pd.DataFrame:
 def _load_clinical(config: Config) -> pd.DataFrame | None:
     c = config["clinical"]
     path = config.path("paths", "clinical_csv")
-    if not os.path.exists(path):
-        print(f"[assemble] WARNING: clinical_csv not found ({path}); "
-              f"covariates will be NaN. Downstream stats (module 7) require it.")
+    if not path or not os.path.exists(path):
+        print("[assemble] NOTE: no clinical_csv yet -> MMSE/age/APOE4/ARIA/"
+              "baseline_severity left as NaN (dt is still computed from dates). "
+              "This is fine through the scree gate; module 7 (phenotype_stats) "
+              "needs the clinical table.")
         return None
     df = pd.read_csv(path)
     rename = {
