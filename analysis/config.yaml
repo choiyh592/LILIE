@@ -68,6 +68,15 @@ delta:
   num_workers: 4
   max_epochs: 200
   start_saving_epoch: 20
+  log_every_n_steps: 10           # step-level logging interval; keep <= batches/epoch
+                                  # (~7 here) to log within these small epochs
+  # Early stopping on the held-out ordering metric; the BEST epoch is restored
+  # for delta extraction. Lets you raise n_draws / max_epochs safely.
+  early_stopping: true
+  es_monitor: val_auroc           # val_auroc (mode max) or val_loss (mode min)
+  es_mode: max
+  es_patience: 25                 # epochs without improvement before stopping
+  es_min_delta: 0.0
   accelerator: auto               # cpu / gpu / auto
   devices: 1                      # SINGLE device only - multi-GPU DDP re-launches
                                   # the whole run_all script per process (breaks it)
