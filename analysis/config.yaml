@@ -70,6 +70,12 @@ delta:
   start_saving_epoch: 20
   log_every_n_steps: 10           # step-level logging interval; keep <= batches/epoch
                                   # (~7 here) to log within these small epochs
+  # Optimizer override for LILIE's hardcoded AdamW(lr=1e-5, wd=5e-4). The default
+  # 1e-5 is very low for this small dataset; try lr ~ 3.0e-4. null = model default.
+  lr: null                        # e.g. 3.0e-4
+  weight_decay: 5.0e-4
+  lr_scheduler: none              # none | cosine (cosine decay over max_epochs)
+  warmup_epochs: 0                # linear warmup epochs before cosine decay
   # Early stopping on the held-out ordering metric; the BEST epoch is restored
   # for delta extraction. Lets you raise n_draws / max_epochs safely.
   early_stopping: true
@@ -110,7 +116,11 @@ reduce:
 run:
   # Stop after module 3 so the explained-variance curve can be inspected before
   # committing to clustering. Set false to let the gate itself route 3 -> 4..8.
-  stop_at_gate: true
+  stop_at_gate: false
+  # Module 6/7 gating. null = auto-detect (module 6 runs iff raw EEG exists;
+  # module 7 runs iff a clinical table exists). true/false to force.
+  run_qeeg: null
+  run_phenotype: null
 
 # -----------------------------------------------------------------------------
 # Modules 4-8 (scaffolded; parameters pre-declared for when they are enabled)

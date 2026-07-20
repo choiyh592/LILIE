@@ -147,10 +147,16 @@ def main(config: Config) -> str:
           f"{' + '.join(spec['covariates'])} | groups={spec['groups']} "
           f"| FDR alpha={spec['fdr_alpha']}")
 
-    features_df = io.read_table(config.out("qeeg_connectivity"))
     meta_df = io.read_table(config.out("progressions"))[
         ["progression_id", "patient_id", "dt", "baseline_severity",
          "APOE4", "ARIA", "age", "MMSE_delta"]]
+    # The covariate-adjusted model needs real covariates. If the clinical table
+    # was never provided, these are all NaN -> nothing to adjust for.
+    if meta_df[list(spec["covariates"])].isna().all().any():
+        raise SystemExit("[phenotype_stats] required covariates are all-NaN "
+                         "(no clinical table). Provide paths.clinical_csv and "
+                         "re-run assemble; skipping covariate-adjusted stats.")
+    features_df = io.read_table(config.out("qeeg_connectivity"))
 
     labels_path = config.out("labels.npz")
     import os

@@ -64,6 +64,45 @@ def _pair_indices(before_idx, after_idx, max_pairs, rng):
 
 
 # --- training (torch) --------------------------------------------------------
+def _maybe_override_optimizer(model, d, max_epochs):
+    """Rebind LILIE.configure_optimizers from config (lr / weight_decay / scheduler).
+
+    No-op if ``delta.lr`` is null -> the model keeps its built-in
+    AdamW(lr=1e-5, wd=5e-4). Supports an optional cosine schedule with linear
+    warmup (epoch-based, so it needs no steps-per-epoch estimate).
+    """
+    lr = d.get("lr", None)
+    if lr is None or str(lr).strip() == "":
+        return
+    import math
+    import types
+    import torch
+
+    lr = float(lr)
+    wd = float(d.get("weight_decay", 5e-4))
+    sched = str(d.get("lr_scheduler", "none")).lower()
+    warmup = int(d.get("warmup_epochs", 0))
+
+    def configure_optimizers(self):
+        opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=wd)
+        if sched != "cosine":
+            return opt
+
+        def lr_lambda(epoch):
+            if warmup and epoch < warmup:
+                return float(epoch + 1) / float(warmup)
+            prog = (epoch - warmup) / max(1, max_epochs - warmup)
+            return 0.5 * (1.0 + math.cos(math.pi * min(1.0, prog)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+        return {"optimizer": opt,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
+
+    model.configure_optimizers = types.MethodType(configure_optimizers, model)
+    print(f"[delta] optimizer override: AdamW(lr={lr:g}, wd={wd:g}), "
+          f"scheduler={sched}, warmup_epochs={warmup}")
+
+
 def _train_fold(config: Config, test_idx: int):
     """Train LILIE with fold ``test_idx`` held out; return (model, val_probs, val_labels)."""
     import torch
@@ -99,6 +138,10 @@ def _train_fold(config: Config, test_idx: int):
         pool_method=d["pool_method"],
         clf_method=d["clf_method"],
     )
+    # Optionally override LILIE's hardcoded AdamW(lr=1e-5, wd=5e-4). At n=55
+    # progressions the ordering signal is small, so the learning rate is usually
+    # a bigger lever than raw epoch count.
+    _maybe_override_optimizer(model, d, int(d["max_epochs"]))
 
     # A100 tensor cores: trade a little float32 precision for speed (silences the
     # Lightning tip and speeds training).
