@@ -76,8 +76,8 @@ delta:
   es_monitor: val_auroc           # val_auroc (mode max) or val_loss (mode min)
   es_mode: max
   es_patience: 25                 # epochs without improvement before stopping
-  es_min_delta: 0.0
-  accelerator: auto               # cpu / gpu / auto
+  es_min_delta: 0.0001
+  accelerator: gpu               # cpu / gpu / auto
   devices: 1                      # SINGLE device only - multi-GPU DDP re-launches
                                   # the whole run_all script per process (breaks it)
   device_index: 3                 # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
