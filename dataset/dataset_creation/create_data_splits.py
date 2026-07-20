@@ -73,4 +73,4 @@ def create_data_splits(csv_path, save_dir, num_splits=None, seed=42):
             split_df.to_csv(save_dir + f'/longitudinal_pairs_fold_{i+1}.csv', index=False)
 
 if __name__ == "__main__":
-    create_data_splits("/home/yhchoi/EEG_Data/260403_Leqembi/Embeddings_LUNA/metadata.csv", "/home/yhchoi/EEG_Data/260403_Leqembi/Embeddings_LUNA/splits", 5)
+    create_data_splits("/home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_metadata.csv", "/home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/splits", 5)

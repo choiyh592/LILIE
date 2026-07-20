@@ -8,22 +8,22 @@ paths:
   # Embeddings metadata: one row per segment, columns `group_name`
   # ("ID_YYYY_MM_DD_...") and `dataset_idx`. This is the file consumed by
   # create_data_splits and LongitudinalEEGDataset.
-  metadata_csv: /path/to/Embeddings/metadata.csv
+  metadata_csv: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_metadata.csv
   # Memory-mapped .npy of segment embeddings, indexed by `dataset_idx`.
-  embeddings_npy: /path/to/Embeddings/embeddings.npy
+  embeddings_npy: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_embeddings.npy
   # Clinical/demographic table (NEW - not in the repo metadata). One row per
   # (patient, session_date) with the covariates below. See `clinical` block.
   clinical_csv: /path/to/clinical_metadata.csv
   # Preprocessed raw EEG root (module 6, qeeg). One recording per session.
-  raw_eeg_dir: /path/to/preprocessed_raw
+  raw_eeg_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Preprocessed/Leqembi
 
   # --- Working / output ------------------------------------------------------
-  splits_dir: ./_work/splits         # create_data_splits writes fold CSVs here
-  output_dir: ./_work/out            # all intermediate + final artifacts
+  splits_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260720/splits         # create_data_splits writes fold CSVs here
+  output_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260720/out            # all intermediate + final artifacts
 
 # Where the reused repo modules live relative to run cwd. run_all inserts this
 # on sys.path so `from dataset.datasets import ...` resolves. "." = repo root.
-repo_root: "."
+repo_root: "/home/won_ju_kim/yhchoi/Leqembi_260716/LILIE"
 
 seed: 42
 
