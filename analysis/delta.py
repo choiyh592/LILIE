@@ -67,11 +67,19 @@ def _pair_indices(before_idx, after_idx, max_pairs, rng):
 def _train_fold(config: Config, test_idx: int):
     """Train LILIE with fold ``test_idx`` held out; return (model, val_probs, val_labels)."""
     import torch
+    import warnings
     import lightning as L
     from lightning.pytorch.loggers import CSVLogger
+    from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
     from dataset.datasets import create_train_test_splits
     from models.models import LILIE
+
+    # Random per-sample labels on a small held-out fold occasionally give a
+    # single-class batch -> torchmetrics AUROC is undefined there. Benign; the
+    # repo's train.py silences the same messages.
+    warnings.filterwarnings("ignore", message=".*No negative samples in targets.*")
+    warnings.filterwarnings("ignore", message=".*No positive samples in targets.*")
 
     d = config["delta"]
     train_loader, test_loader = create_train_test_splits(
@@ -123,6 +131,22 @@ def _train_fold(config: Config, test_idx: int):
                   f"Use delta.device_index to pick a specific GPU.")
             devices = 1
 
+    # Early stopping on the held-out ordering metric, restoring the BEST epoch
+    # for delta extraction (Lightning's EarlyStopping alone leaves you at the
+    # stop epoch, not the best; the ModelCheckpoint gives us best-weight restore).
+    use_es = bool(d.get("early_stopping", False))
+    callbacks, ckpt = [], None
+    if use_es:
+        monitor = d.get("es_monitor", "val_auroc")
+        mode = d.get("es_mode", "max")
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(config.out("_ckpt"), f"fold{test_idx}"),
+            monitor=monitor, mode=mode, save_top_k=1, filename="best")
+        es = EarlyStopping(monitor=monitor, mode=mode,
+                           patience=int(d.get("es_patience", 25)),
+                           min_delta=float(d.get("es_min_delta", 0.0)))
+        callbacks = [ckpt, es]
+
     logger = CSVLogger(config.out("_lightning_logs"), name=f"fold{test_idx}")
     trainer = L.Trainer(
         logger=logger,
@@ -131,10 +155,21 @@ def _train_fold(config: Config, test_idx: int):
         devices=devices,
         strategy="auto",
         num_sanity_val_steps=0,
-        enable_checkpointing=False,
+        log_every_n_steps=int(d.get("log_every_n_steps", 10)),
+        callbacks=callbacks,
+        enable_checkpointing=use_es,
         enable_progress_bar=False,
     )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=test_loader)
+
+    # Restore best-epoch weights for the delta extraction.
+    if use_es and ckpt is not None and ckpt.best_model_path:
+        print(f"[delta] fold {test_idx}: restoring best epoch "
+              f"({ckpt.monitor}={float(ckpt.best_model_score):.4f}) from checkpoint")
+        model = LILIE.load_from_checkpoint(
+            ckpt.best_model_path, map_location="cpu",
+            input_dim=int(d["input_dim"]), embedding_size=int(d["embedding_size"]),
+            num_classes=2, pool_method=d["pool_method"], clf_method=d["clf_method"])
 
     # Move to CPU for all subsequent inference (held-out predictions + the
     # per-progression deltas in main), so the model and the CPU segment tensors
