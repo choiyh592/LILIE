@@ -151,7 +151,7 @@ stability:
   sensitivity: [pool_method, k_pm1, kmeans_vs_gmm]
 
 qeeg:
-  fs: null                        # sampling rate (Hz); null = read from raw
+  fs: 200                       # sampling rate (Hz); null = read from raw
   bands:
     delta: [1, 4]
     theta: [4, 8]
