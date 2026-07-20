@@ -58,12 +58,12 @@ assemble:
 delta:
   # LILIE pooler. Primary = Delta. In the repo Delta is selected by
   # pool_method "Linear" or "Raw"; "Attentive" -> AttentiveDelta, "NN" -> NNDelta.
-  pool_method: Linear             # PRIMARY (Delta)
+  pool_method: Attentive             # PRIMARY (Delta)
   sensitivity_pool_methods: [Attentive, NN]   # config-switchable variants
-  clf_method: Linear
-  input_dim: 256
-  embedding_size: 256
-  n_draws: 5                      # segment-pair draws per date (augmentation)
+  clf_method: NN
+  input_dim: 200
+  embedding_size: 200
+  n_draws: 20                      # segment-pair draws per date (augmentation)
   batch_size: 32
   num_workers: 4
   max_epochs: 200
@@ -71,7 +71,7 @@ delta:
   accelerator: auto               # cpu / gpu / auto
   devices: 1                      # SINGLE device only - multi-GPU DDP re-launches
                                   # the whole run_all script per process (breaks it)
-  device_index: null              # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
+  device_index: 3                 # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
                                   # null = default single device. Overrides `devices`.
                                   # CLI --device N overrides this.
   # Per-progression delta: how many before x after segment pairs to aggregate.
