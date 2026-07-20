@@ -66,6 +66,17 @@ def main(config: Config) -> dict:
         sd[sd == 0] = 1.0
         X = (X - mu) / sd
 
+    # Directional mode: L2-normalize each delta onto the unit hypersphere so the
+    # analysis is about the DIRECTION of change (what kind), not the magnitude
+    # (how much). Removes the magnitude confound (dt, noise) and the extreme-norm
+    # outliers that otherwise dominate PCA. The gate then tests for directional
+    # structure.
+    if str(r.get("normalize", "none")) == "unit":
+        nrm = np.linalg.norm(X, axis=1, keepdims=True)
+        nrm[nrm == 0] = 1.0
+        X = X / nrm
+        print("[reduce] directional mode: unit-normalized deltas before PCA")
+
     max_comp = r["max_components"] or min(X.shape[0], X.shape[1])
     max_comp = int(min(max_comp, X.shape[0], X.shape[1]))
     pca = PCA(n_components=max_comp, random_state=int(config["seed"]))

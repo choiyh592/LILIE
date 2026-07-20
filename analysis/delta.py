@@ -218,7 +218,13 @@ def _train_fold(config: Config, test_idx: int):
     # per-progression deltas in main), so the model and the CPU segment tensors
     # always agree on device regardless of which GPU trained the fold.
     model = model.to("cpu")
-    # Collect held-out ordering predictions.
+    # Collect held-out ordering predictions. test_loader is unshuffled, so sample
+    # i maps deterministically to valid_pairs[i // n_draws] -> the patient id;
+    # we carry that so the pooled AUC CI can be resampled by PATIENT (avoiding
+    # pseudo-replication from the n_draws correlated draws per progression).
+    ds = test_loader.dataset
+    nd = int(ds.n_draws)
+    patients = np.array([ds.valid_pairs[i // nd][0][0] for i in range(len(ds))])
     model.eval()
     probs, labels = [], []
     with torch.no_grad():
@@ -227,23 +233,54 @@ def _train_fold(config: Config, test_idx: int):
             p = torch.softmax(logits, dim=1)[:, 1]
             probs.append(p.cpu().numpy())
             labels.append(y.cpu().numpy())
-    return model, np.concatenate(probs), np.concatenate(labels)
+    return model, np.concatenate(probs), np.concatenate(labels), patients
 
 
-def _bootstrap_auc_ci(probs, labels, n_boot, seed, alpha=0.05):
+def _bootstrap_auc_ci(probs, labels, patients, n_boot, seed, alpha=0.05):
+    """Patient-CLUSTERED bootstrap CI for AUC.
+
+    Resamples patients (not individual predictions) with replacement, so the
+    ~n_draws correlated predictions per progression move together. This gives an
+    honest interval; a per-prediction bootstrap is anti-conservatively narrow.
+    """
     from sklearn.metrics import roc_auc_score
     rng = np.random.default_rng(seed)
+    probs, labels, patients = np.asarray(probs), np.asarray(labels), np.asarray(patients)
     point = float(roc_auc_score(labels, probs))
-    n = len(labels)
+    uniq = np.unique(patients)
+    idx_by_pat = {p: np.where(patients == p)[0] for p in uniq}
     boots = []
     for _ in range(n_boot):
-        idx = rng.integers(0, n, size=n)
-        if len(np.unique(labels[idx])) < 2:
+        samp = rng.choice(uniq, size=len(uniq), replace=True)
+        idx = np.concatenate([idx_by_pat[p] for p in samp])
+        if np.unique(labels[idx]).size < 2:
             continue
         boots.append(roc_auc_score(labels[idx], probs[idx]))
     lo, hi = (np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
               if boots else (np.nan, np.nan))
     return point, float(lo), float(hi)
+
+
+def _permutation_pvalue(probs, labels, n_perm, seed):
+    """One-sided permutation p-value that ordering AUC > 0.5 (retrain-free).
+
+    Shuffles the labels of the pooled predictions and recomputes AUC to build an
+    empirical null; p = (#perm AUC >= observed + 1) / (n + 1).
+    """
+    from sklearn.metrics import roc_auc_score
+    rng = np.random.default_rng(seed + 1)
+    probs, labels = np.asarray(probs), np.asarray(labels)
+    obs = float(roc_auc_score(labels, probs))
+    ge, total = 0, 0
+    for _ in range(n_perm):
+        yp = rng.permutation(labels)
+        if np.unique(yp).size < 2:
+            continue
+        total += 1
+        if roc_auc_score(yp, probs) >= obs:
+            ge += 1
+    p = (ge + 1) / (total + 1) if total else float("nan")
+    return obs, float(p)
 
 
 def _progression_delta(model, embeddings, before_idx, after_idx, pairs):
@@ -285,18 +322,24 @@ def main(config: Config) -> str:
     out_of_fold = bool(d["out_of_fold_deltas"])
 
     # 1. Train per fold; keep models + pooled ordering predictions.
-    models, all_probs, all_labels = {}, [], []
+    models, all_probs, all_labels, all_pat = {}, [], [], []
     for f in range(1, num_folds + 1):
         print(f"[delta] training LILIE (pool={d['pool_method']}) holding out fold {f}")
-        model, probs, labels = _train_fold(config, test_idx=f)
+        model, probs, labels, pats = _train_fold(config, test_idx=f)
         models[f] = model
         all_probs.append(probs)
         all_labels.append(labels)
+        all_pat.append(pats)
     all_probs = np.concatenate(all_probs)
     all_labels = np.concatenate(all_labels)
-    auc, lo, hi = _bootstrap_auc_ci(all_probs, all_labels, int(d["bootstrap_ci_n"]), seed)
+    all_pat = np.concatenate(all_pat)
+    auc, lo, hi = _bootstrap_auc_ci(all_probs, all_labels, all_pat,
+                                    int(d["bootstrap_ci_n"]), seed)
+    _, perm_p = _permutation_pvalue(all_probs, all_labels,
+                                    int(d.get("permutation_n", 1000)), seed)
     print(f"[delta] pooled out-of-fold ordering AUC = {auc:.3f} "
-          f"[{lo:.3f}, {hi:.3f}] (95% bootstrap)")
+          f"[{lo:.3f}, {hi:.3f}] (95% patient-clustered bootstrap); "
+          f"permutation p={perm_p:.4f}")
 
     # 2. Per-progression median segment-pair delta (out-of-fold model).
     pids, prog_ids, folds, dts = [], [], [], []
@@ -343,7 +386,10 @@ def main(config: Config) -> str:
     )
     io.write_json(
         {"pool_method": d["pool_method"], "ordering_auc": auc,
-         "ordering_auc_ci95": [lo, hi], "n_progressions": int(delta_mat.shape[0]),
+         "ordering_auc_ci95": [lo, hi], "ci_method": "patient_clustered_bootstrap",
+         "permutation_pvalue": perm_p, "n_patients": int(np.unique(all_pat).size),
+         "n_predictions": int(all_labels.size),
+         "n_progressions": int(delta_mat.shape[0]),
          "delta_dim": int(delta_mat.shape[1]), "n_skipped": len(skipped)},
         config.out("ordering_auc.json"),
     )

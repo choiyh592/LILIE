@@ -28,6 +28,7 @@ from sklearn.metrics import silhouette_score
 from .config import Config, load_config, add_arg
 from . import io
 from . import invariants
+from . import outliers
 
 
 def _within_dispersion(X, labels):
@@ -40,8 +41,18 @@ def _within_dispersion(X, labels):
     return total
 
 
-def gap_statistic(X, k, seed, n_ref=25):
-    """Tibshirani gap statistic for a given k, with uniform bounding-box refs."""
+def _unit(A):
+    n = np.linalg.norm(A, axis=1, keepdims=True)
+    n[n == 0] = 1.0
+    return A / n
+
+
+def gap_statistic(X, k, seed, n_ref=25, spherical=False):
+    """Tibshirani gap statistic for a given k, with uniform bounding-box refs.
+
+    In spherical mode the uniform references are projected to the unit sphere so
+    the null matches directional (unit-vector) data.
+    """
     rng = np.random.default_rng(seed + k)
     km = KMeans(n_clusters=k, n_init=10, random_state=seed).fit(X)
     logWk = np.log(_within_dispersion(X, km.labels_) + 1e-12)
@@ -49,6 +60,8 @@ def gap_statistic(X, k, seed, n_ref=25):
     ref_logW = []
     for _ in range(n_ref):
         Xr = rng.uniform(mins, maxs, size=X.shape)
+        if spherical:
+            Xr = _unit(Xr)
         kmr = KMeans(n_clusters=k, n_init=5, random_state=seed).fit(Xr)
         ref_logW.append(np.log(_within_dispersion(Xr, kmr.labels_) + 1e-12))
     ref_logW = np.array(ref_logW)
@@ -57,13 +70,15 @@ def gap_statistic(X, k, seed, n_ref=25):
     return gap, sk
 
 
-def select_k(X, k_min, k_max, seed):
+def select_k(X, k_min, k_max, seed, spherical=False):
     """Return (chosen_k, table) using gap 1-SE rule; silhouette reported too."""
+    sil_metric = "cosine" if spherical else "euclidean"
     rows = []
     for k in range(k_min, k_max + 1):
         km = KMeans(n_clusters=k, n_init=10, random_state=seed).fit(X)
-        sil = silhouette_score(X, km.labels_) if k >= 2 and len(np.unique(km.labels_)) > 1 else np.nan
-        gap, sk = gap_statistic(X, k, seed)
+        sil = (silhouette_score(X, km.labels_, metric=sil_metric)
+               if k >= 2 and len(np.unique(km.labels_)) > 1 else np.nan)
+        gap, sk = gap_statistic(X, k, seed, spherical=spherical)
         rows.append({"k": k, "silhouette": sil, "gap": gap, "sk": sk})
     # Tibshirani: smallest k with Gap(k) >= Gap(k+1) - s_{k+1}. Favors small k.
     chosen = rows[0]["k"]
@@ -89,17 +104,47 @@ def main(config: Config) -> str:
 
     invariants.assert_progression_unit(X.shape[0], prog_ids)
 
+    # Directional clustering: on the unit sphere, spherical k-means == Euclidean
+    # k-means on L2-normalized vectors, so we normalize the PC scores and run the
+    # usual machinery. Clusters then group progressions by DIRECTION of change.
+    metric = str(cc.get("metric", "euclidean"))
+    spherical = metric == "cosine"
+    Xuse = _unit(X) if spherical else X
+    if spherical:
+        print("[cluster] directional (cosine/spherical) k-means on unit-normalized "
+              "PC scores")
+
+    # Outlier handling: cluster the CORE population, mark extremes as -1 so a few
+    # aberrant deltas don't force tiny outlier-only clusters. In directional mode
+    # this flags anomalous change *directions*, not large magnitudes.
+    handling = str(cc.get("outlier_handling", "none"))
+    if handling == "mark_separately":
+        mask, _score, _cut = outliers.outlier_mask(
+            Xuse, method=str(cc.get("outlier_method", "lof")),
+            quantile=float(cc.get("outlier_quantile", 0.975)),
+            n_neighbors=int(cc.get("outlier_n_neighbors", 20)), seed=seed)
+    else:
+        mask = np.zeros(X.shape[0], dtype=bool)
+    core = ~mask
+    Xc = Xuse[core]
+    n_out = int(mask.sum())
+    if n_out:
+        print(f"[cluster] {n_out}/{X.shape[0]} progressions marked outliers "
+              f"(cluster=-1); clustering the {int(core.sum())} core progressions.")
+
     k_min, k_max = int(cc["k_range"][0]), int(cc["k_range"][1])
-    k_max = min(k_max, X.shape[0] - 1)
-    chosen_k, table = select_k(X, k_min, k_max, seed)
+    k_max = min(k_max, Xc.shape[0] - 1)
+    chosen_k, table = select_k(Xc, k_min, k_max, seed, spherical=spherical)
 
-    # primary: k-means at chosen k
-    km = KMeans(n_clusters=chosen_k, n_init=25, random_state=seed).fit(X)
-    labels = km.labels_
+    # primary: (spherical) k-means at chosen k (fit on core; outliers stay -1)
+    km = KMeans(n_clusters=chosen_k, n_init=25, random_state=seed).fit(Xc)
+    labels = np.full(X.shape[0], -1, dtype=int)
+    labels[core] = km.labels_
 
-    # sensitivity: GMM at chosen k
-    gmm = GaussianMixture(n_components=chosen_k, n_init=5, random_state=seed).fit(X)
-    gmm_labels = gmm.predict(X)
+    # sensitivity: GMM at chosen k (core)
+    gmm = GaussianMixture(n_components=chosen_k, n_init=5, random_state=seed).fit(Xc)
+    gmm_labels = np.full(X.shape[0], -1, dtype=int)
+    gmm_labels[core] = gmm.predict(Xc)
 
     # write selection table
     import csv
@@ -112,12 +157,13 @@ def main(config: Config) -> str:
 
     np.savez(config.out("labels.npz"),
              progression_id=prog_ids, patient_id=patient_id, fold=fold,
-             cluster=labels, k=chosen_k, algorithm="kmeans")
+             cluster=labels, is_outlier=mask, k=chosen_k, algorithm="kmeans")
     np.savez(config.out("cluster_gmm.npz"),
              progression_id=prog_ids, cluster=gmm_labels, k=chosen_k, algorithm="gmm")
 
     sizes = {int(c): int((labels == c).sum()) for c in np.unique(labels)}
-    print(f"[cluster] chosen k={chosen_k} (gap 1-SE rule). k-means cluster sizes: {sizes}")
+    print(f"[cluster] chosen k={chosen_k} (gap 1-SE rule) on core. cluster sizes "
+          f"(-1 = outliers): {sizes}")
     print(f"[cluster] selection table -> {sel_path}; labels -> {config.out('labels.npz')}")
     return config.out("labels.npz")
 

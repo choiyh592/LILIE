@@ -82,8 +82,10 @@ def run(config: Config, start_from: str = "assemble") -> dict:
     # Gate routing.
     if invariants.should_proceed(gate):
         print("\n[run_all] gate: PROCEED -> clustering branch")
-        from . import cluster, stability, qeeg, phenotype_stats, report
+        from . import cluster, stability, qeeg, phenotype_stats, report, outlier_qc
 
+        print("\n=== Outlier QC (diagnostic) ===")
+        outlier_qc.main(config)
         print("\n=== Module 4: cluster ===")
         cluster.main(config)
         print("\n=== Module 5: stability ===")

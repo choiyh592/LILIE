@@ -80,6 +80,11 @@ def main(config: Config) -> str:
         pc2 = scores[m, 1] if scores.shape[1] > 1 else np.zeros(m.sum())
         ax.scatter(scores[m, 0], pc2, s=28, color=colors[c], label=f"cluster {c} (n={int(m.sum())})",
                    alpha=0.85, edgecolor="white", linewidth=0.5)
+    om = clab == -1
+    if om.any():
+        pc2 = scores[om, 1] if scores.shape[1] > 1 else np.zeros(int(om.sum()))
+        ax.scatter(scores[om, 0], pc2, s=42, color="#999999", marker="x",
+                   label=f"outliers (n={int(om.sum())})")
     ax.set_title("(b) PCA scatter by cluster")
     ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.legend(frameon=False, fontsize=8)
 
@@ -107,6 +112,7 @@ def main(config: Config) -> str:
                 fc_col = cand; break
     if fc_col is not None:
         qd = qeeg[["progression_id", fc_col]].merge(labels[["progression_id", "cluster"]], on="progression_id")
+        qd = qd[qd["cluster"] >= 0]
         means = qd.groupby("cluster")[fc_col].mean()
         sems = qd.groupby("cluster")[fc_col].sem()
         ax.bar([str(c) for c in means.index], means.values,
@@ -120,25 +126,29 @@ def main(config: Config) -> str:
     fig.savefig(config.out("report_figure.png"), dpi=int(config["report"]["fig_dpi"]))
     plt.close(fig)
 
-    # --- per-cluster table (drop all-NaN clinical columns) ---
+    # --- per-cluster table (core clusters only; drop all-NaN clinical columns) ---
+    n_outliers = int((df["cluster"] == -1).sum())
+    df_core = df[df["cluster"] >= 0]
     agg = {"n": ("progression_id", "count"), "dt_mean": ("dt", "mean"), "dt_sd": ("dt", "std")}
     for col in ["baseline_severity", "age", "MMSE_delta"]:
-        if col in df and df[col].notna().any():
+        if col in df_core and df_core[col].notna().any():
             agg[f"{col}_mean"] = (col, "mean")
     for col in ["APOE4", "ARIA"]:
-        if col in df and df[col].notna().any():
+        if col in df_core and df_core[col].notna().any():
             agg[f"{col}_pct"] = (col, lambda s: 100.0 * np.nanmean((s.values > 0).astype(float)))
-    table = df.groupby("cluster").agg(**agg)
+    table = df_core.groupby("cluster").agg(**agg)
     if qeeg is not None and fc_col is not None:
         qd = qeeg[["progression_id", fc_col]].merge(labels[["progression_id", "cluster"]], on="progression_id")
-        table[f"{fc_col}_mean"] = qd.groupby("cluster")[fc_col].mean()
+        table[f"{fc_col}_mean"] = qd[qd["cluster"] >= 0].groupby("cluster")[fc_col].mean()
     table.to_csv(config.out("report_table.csv"))
 
     # --- markdown summary ---
     gate = io.read_json(config.out("gate.json")) if os.path.exists(config.out("gate.json")) else {}
+    core_sizes = df_core.groupby("cluster").size().to_dict()
     lines = ["# EEG Trajectory Phenotype - run summary", "",
              f"- Gate: **{gate.get('route','?').upper()}** - {gate.get('rationale','')}",
-             f"- k = {k}; cluster sizes: {df.groupby('cluster').size().to_dict()}"]
+             f"- k = {k} core cluster(s); sizes: {core_sizes}"
+             + (f"; outliers (cluster -1): {n_outliers}" if n_outliers else "")]
     if stability:
         lines.append(f"- Stability: ARI={stability['ari_mean']:.2f} {stability['ari_ci95']}, "
                      f"flagged clusters (Jaccard<{stability['jaccard_flag_below']}): "
