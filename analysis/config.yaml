@@ -13,7 +13,10 @@ paths:
   embeddings_npy: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_embeddings.npy
   # Clinical/demographic table (NEW - not in the repo metadata). One row per
   # (patient, session_date) with the covariates below. See `clinical` block.
-  clinical_csv: /path/to/clinical_metadata.csv
+  # Leave as `null` if you don't have it yet: modules 1-3 (through the scree
+  # gate) run fine without it; covariates are filled NaN and only module 7
+  # (phenotype_stats) needs them.
+  clinical_csv: null
   # Preprocessed raw EEG root (module 6, qeeg). One recording per session.
   raw_eeg_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Preprocessed/Leqembi
 
@@ -66,7 +69,11 @@ delta:
   max_epochs: 200
   start_saving_epoch: 20
   accelerator: auto               # cpu / gpu / auto
-  devices: auto
+  devices: 1                      # SINGLE device only - multi-GPU DDP re-launches
+                                  # the whole run_all script per process (breaks it)
+  device_index: null              # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
+                                  # null = default single device. Overrides `devices`.
+                                  # CLI --device N overrides this.
   # Per-progression delta: how many before x after segment pairs to aggregate.
   # null = use all available pairs. Median is taken across pairs.
   max_segment_pairs: null
