@@ -149,11 +149,13 @@ def reliability_split(norm, spread, dp):
 
 
 def _consecutive_consistency(prog_ids, patient_id, delta):
-    """Cosine between a patient's consecutive deltas (t1->t2 vs t2->t3)."""
+    """Per patient: cosine between consecutive deltas (t1->t2 vs t2->t3), tagged
+    with each step's magnitude so persistence can be read against reliability."""
+    norm = np.linalg.norm(delta, axis=1)
     df = pd.DataFrame({"pid": patient_id, "gid": prog_ids, "idx": np.arange(len(prog_ids))})
     parts = df["gid"].astype(str).str.split("__", expand=True)
     df["before"], df["after"] = parts[1], parts[2]
-    cosines = []
+    pairs = []
     for pid, g in df.groupby("pid"):
         if len(g) < 2:
             continue
@@ -161,10 +163,43 @@ def _consecutive_consistency(prog_ids, patient_id, delta):
         rows = g.to_dict("records")
         for a, b in zip(rows, rows[1:]):
             if a["after"] == b["before"]:                 # truly consecutive
-                da, db = delta[a["idx"]], delta[b["idx"]]
-                c = float(da @ db / (np.linalg.norm(da) * np.linalg.norm(db) + 1e-12))
-                cosines.append(c)
-    return cosines
+                ia, ib = a["idx"], b["idx"]
+                c = float(delta[ia] @ delta[ib] / (norm[ia] * norm[ib] + 1e-12))
+                pairs.append({"patient": int(pid), "cosine": c,
+                              "mag_step1": float(norm[ia]), "mag_step2": float(norm[ib])})
+    return pairs
+
+
+def robustness_sweep(U, norm, patient_id, dp, seed, percentiles):
+    """Re-split at several magnitude thresholds; force k=2 (the two dominant
+    modes) and report whether the two high-magnitude phenotypes persist."""
+    cap0 = int(dp.get("direction_dims", 10))
+    var_target = float(dp.get("direction_var", 0.9))
+    rows = []
+    for pct in percentiles:
+        cut = np.percentile(norm, pct)
+        rel = norm >= cut
+        if rel.sum() < 6:
+            continue
+        cap = int(min(cap0, rel.sum() - 1, U.shape[1]))
+        pca = PCA(n_components=cap, random_state=seed).fit(U[rel])
+        cum = np.cumsum(pca.explained_variance_ratio_)
+        r = int(max(2, min(cap, np.searchsorted(cum, var_target) + 1)))
+        Xr = _unit(pca.transform(U[rel])[:, :r])
+        lab = KMeans(2, n_init=10, random_state=seed).fit_predict(Xr)
+        sil = float(silhouette_score(Xr, lab, metric="cosine")) if len(set(lab)) > 1 else np.nan
+        idx = np.where(rel)[0]
+        clusters = []
+        for c in sorted(set(lab)):
+            m = lab == c; gi = idx[m]
+            clusters.append({"n": int(m.sum()),
+                             "n_patients": int(len(set(patient_id[gi].tolist()))),
+                             "mean_magnitude": float(norm[gi].mean()),
+                             "resultant_length": float(np.linalg.norm(Xr[m].mean(0)))})
+        rows.append({"percentile": int(pct), "cut": float(cut),
+                     "n_reliable": int(rel.sum()), "k2_silhouette": sil,
+                     "clusters": clusters})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -271,9 +306,17 @@ def main(config: Config) -> str:
                              kappa=vfit["kappa"])
     char_sph = _characterize(sph_labels, reliable_idx, norm, spread, patient_id)
 
-    # 4. trajectory consistency + angle rose
-    cosines = _consecutive_consistency(prog_ids, patient_id, delta)
+    # 4. trajectory consistency (tagged with step magnitudes) + angle rose
+    pairs = _consecutive_consistency(prog_ids, patient_id, delta)
+    cos_list = [p["cosine"] for p in pairs]
+    med_mag = float(np.median(norm))
+    hm_cos = [p["cosine"] for p in pairs
+              if min(p["mag_step1"], p["mag_step2"]) >= med_mag]
     angles = np.arctan2(emb2[reliable, 1], emb2[reliable, 0])
+
+    # 5. robustness: does the 2-phenotype structure survive higher thresholds?
+    sweep_pcts = dp.get("robustness_percentiles", [40, 50, 60, 70, 80])
+    sweep = robustness_sweep(U, norm, patient_id, dp, seed, sweep_pcts)
 
     result = {
         "n_total": int(len(delta)), "n_reliable": n_rel,
@@ -284,9 +327,12 @@ def main(config: Config) -> str:
                       "characterization": char_sph},
         "vmf_vs_spherical_ari": _ari(vfit["labels"], sph_labels),
         "trajectory_consistency": {
-            "n_consecutive_pairs": len(cosines),
-            "mean_cosine": float(np.mean(cosines)) if cosines else None,
-            "cosines": cosines},
+            "n_consecutive_pairs": len(pairs),
+            "mean_cosine": float(np.mean(cos_list)) if cos_list else None,
+            "mean_cosine_high_magnitude": float(np.mean(hm_cos)) if hm_cos else None,
+            "n_high_magnitude_pairs": len(hm_cos),
+            "pairs": pairs},
+        "robustness_sweep": sweep,
     }
     io.write_json(result, config.out("directional_phenotype.json"))
 
@@ -297,14 +343,21 @@ def main(config: Config) -> str:
                   "vmf_label": lab_full_v, "spherical_label": lab_full_s}
                  ).to_csv(config.out("directional_phenotype_labels.csv"), index=False)
 
-    _plot(emb2, reliable, vfit["labels"], angles, cosines, vmf_rows, sph_rows,
+    _plot(emb2, reliable, vfit["labels"], angles, cos_list, vmf_rows, sph_rows,
           config.out("directional_phenotype.png"), int(config["report"]["fig_dpi"]))
 
     print(f"[dir_pheno] vMF chose k={vk} (BIC); spherical chose k={sk} (silhouette); "
           f"agreement ARI={result['vmf_vs_spherical_ari']:.2f}")
-    if cosines:
-        print(f"[dir_pheno] trajectory persistence: mean cos(step1,step2)="
-              f"{np.mean(cosines):.2f} over {len(cosines)} patient(s)")
+    if cos_list:
+        print(f"[dir_pheno] trajectory persistence: mean cos={np.mean(cos_list):.2f} "
+              f"(all {len(cos_list)} pairs); "
+              f"{('mean cos=%.2f (%d high-mag pairs)' % (np.mean(hm_cos), len(hm_cos))) if hm_cos else 'no high-mag pairs'}")
+    print("[dir_pheno] robustness sweep (k=2 forced):")
+    for row in sweep:
+        cl = ", ".join(f"n={c['n']}/pat{c['n_patients']}/mag{c['mean_magnitude']:.2f}/R{c['resultant_length']:.2f}"
+                       for c in row["clusters"])
+        print(f"[dir_pheno]   p{row['percentile']} (n={row['n_reliable']}, "
+              f"sil={row['k2_silhouette']:.2f}): {cl}")
     print(f"[dir_pheno] wrote directional_phenotype.{{json,png,csv}} to {config.output_dir}")
     return config.out("directional_phenotype.png")
 
