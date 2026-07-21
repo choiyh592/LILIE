@@ -111,7 +111,7 @@ reduce:
   #   zvec - per-vector z-score: center each delta + scale to unit variance
   #          (like L2 but also strips each vector's mean/DC component)
   #   none - keep magnitude (magnitude-based analysis)
-  normalize: unit                 # none | unit | zvec
+  normalize: zvec                 # none | unit | zvec
   max_components: null            # null = min(n_progressions, n_dims)
   gate:
     min_components_above_floor: 2 # >=2 signal components -> proceed
@@ -136,7 +136,7 @@ run:
 # -----------------------------------------------------------------------------
 cluster:
   algorithms: [kmeans, gmm]       # kmeans primary, gmm sensitivity
-  k_range: [2, 6]
+  k_range: [2, 9]
   k_selection: [silhouette, gap]  # favor small k; NOT downstream separation
   # cosine = spherical k-means on unit-normalized PC scores (directional).
   # Pairs with reduce.normalize=unit for a fully directional analysis.
