@@ -21,12 +21,12 @@ paths:
   raw_eeg_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Preprocessed_EEG
 
   # --- Working / output ------------------------------------------------------
-  splits_dir: ./_work/splits         # create_data_splits writes fold CSVs here
-  output_dir: ./_work/out            # all intermediate + final artifacts
+  splits_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260721/splits         # create_data_splits writes fold CSVs here
+  output_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260721/out            # all intermediate + final artifacts
 
 # Where the reused repo modules live relative to run cwd. run_all inserts this
 # on sys.path so `from dataset.datasets import ...` resolves. "." = repo root.
-repo_root: "."
+repo_root: "/home/won_ju_kim/yhchoi/Leqembi_260716/LILIE"
 
 seed: 42
 
@@ -72,7 +72,7 @@ delta:
                                   # (~7 here) to log within these small epochs
   # Optimizer override for LILIE's hardcoded AdamW(lr=1e-5, wd=5e-4). The default
   # 1e-5 is very low for this small dataset; try lr ~ 3.0e-4. null = model default.
-  lr: 3.0e-4                       # e.g. 3.0e-4
+  lr: 1e-4                       # e.g. 3.0e-4
   weight_decay: 5.0e-4
   lr_scheduler: cosine              # none | cosine (cosine decay over max_epochs)
   warmup_epochs: 5                # linear warmup epochs before cosine decay
