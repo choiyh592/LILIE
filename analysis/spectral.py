@@ -35,6 +35,34 @@ def _bandpow(f, P, band):
     return _trapz(P[:, m], f[m], axis=1)                # [C]
 
 
+def _aperiodic(f, P, fmin=2.0, fmax=40.0, n_iter=3):
+    """Aperiodic (1/f) exponent per channel: chi where PSD ~ f^(-chi), chi>0.
+
+    Lightweight specparam-style fit: OLS of log10(PSD) on log10(f) over [fmin,fmax]
+    with iterative masking of points that sit ABOVE the fit (oscillatory peaks), so
+    alpha/beta bumps don't bias the aperiodic slope. Returns (exponent[C], offset[C]).
+    """
+    m = (f >= fmin) & (f <= fmax) & (f > 0)
+    if m.sum() < 6:
+        return np.full(P.shape[0], np.nan), np.full(P.shape[0], np.nan)
+    lf = np.log10(f[m])
+    exps, offs = [], []
+    for c in range(P.shape[0]):
+        lp = np.log10(P[c, m] + 1e-30)
+        keep = np.ones(len(lf), bool)
+        b = np.polyfit(lf, lp, 1)
+        for _ in range(n_iter):
+            resid = lp - np.polyval(b, lf)
+            thr = resid[keep].std() if keep.sum() > 3 else resid.std()
+            keep = resid <= 1.0 * thr                    # drop peaks (above the fit)
+            if keep.sum() < 5:
+                keep = np.ones(len(lf), bool); break
+            b = np.polyfit(lf[keep], lp[keep], 1)
+        exps.append(-float(b[0]))                        # exponent = -slope (positive)
+        offs.append(float(b[1]))
+    return np.array(exps), np.array(offs)
+
+
 def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx) -> dict:
     f, P = _psd(eeg, fs)
     total = _trapz(P, f, axis=1) + 1e-20                # [C]
@@ -77,4 +105,12 @@ def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx) -> dict
     Pn = P / (P.sum(axis=1, keepdims=True) + 1e-20)
     ent = -np.sum(Pn * np.log(Pn + 1e-20), axis=1) / np.log(P.shape[1])
     feats["spectral_entropy_global"] = float(ent.mean())
+
+    # aperiodic (1/f) exponent + offset - the spectral-tilt / E-I-proxy component
+    exp_, off_ = _aperiodic(f, P)
+    if np.isfinite(exp_).any():
+        feats["aperiodic_exponent_global"] = float(np.nanmean(exp_))
+        feats["aperiodic_offset_global"] = float(np.nanmean(off_))
+        if post_idx:
+            feats["aperiodic_exponent_posterior"] = float(np.nanmean(exp_[post_idx]))
     return feats
