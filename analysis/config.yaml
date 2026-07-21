@@ -24,9 +24,9 @@ paths:
   splits_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260721/splits         # create_data_splits writes fold CSVs here
   output_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260721/out            # all intermediate + final artifacts
 
-  control_metadata_csv: /path/to/control/metadata.csv
-  control_embeddings_npy: /path/to/control/embeddings.npy
-  control_splits_dir: ./_work/control_splits
+  control_metadata_csv: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM_Control/test_metadata.csv
+  control_embeddings_npy: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM_Control/test_embeddings.npy
+  control_splits_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260721/control_splits
 
 # Where the reused repo modules live relative to run cwd. run_all inserts this
 # on sys.path so `from dataset.datasets import ...` resolves. "." = repo root.
