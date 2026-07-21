@@ -28,6 +28,7 @@ from .config import Config, load_config, add_arg
 from . import io
 from . import invariants
 from . import connectivity as fc
+from . import spectral as sp
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,9 @@ def session_features(eeg: np.ndarray, fs: float, ch_names, config: Config) -> di
             feats[f"{pref}_posterior"] = fc.submatrix_mean(W, post_idx)
             for mname, val in fc.graph_metrics(W, q["graph_metrics"]).items():
                 feats[f"graph_{pref}_{mname}"] = val
-    # TODO(power): relative alpha/theta power, slowing ratio, PAF, SEF95, entropy.
+    # spectral / power features (relative power, slowing ratio, PAF, SEF95, entropy)
+    if q.get("spectral", True):
+        feats.update(sp.spectral_features(eeg, fs, bands, post_idx))
     return feats
 
 

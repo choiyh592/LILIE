@@ -71,12 +71,55 @@ def centroid_angles(U, labels):
     for i, a in enumerate(cs):
         for b in cs[i + 1:]:
             cos = float(np.clip(mus[a] @ mus[b], -1, 1))
-            deg = float(np.degrees(np.arccos(cos)))
-            rel = ("antipodal (one axis, opposite ends)" if deg > 150 else
-                   "orthogonal (independent)" if 70 <= deg <= 110 else
-                   "aligned" if deg < 30 else "oblique")
-            ang[f"{a}-{b}"] = {"angle_deg": deg, "cosine": cos, "relationship": rel}
+            ang[f"{a}-{b}"] = {"angle_deg": float(np.degrees(np.arccos(cos))), "cosine": cos}
     return cs, R, ang
+
+
+def angle_null_test(U, labels, n_perm, seed):
+    """Compare observed pairwise angles to a permutation null.
+
+    In ~10-D, random directions are ~orthogonal (concentration of measure), so
+    90 deg is the NULL, not a finding. We shuffle phenotype labels (fixed group
+    sizes) to build the null distribution of pairwise centroid angles, then flag
+    pairs that are MORE separated (antipodal) or MORE aligned than chance.
+    """
+    rng = np.random.default_rng(seed)
+    cs, _, obs = centroid_angles(U, labels)
+    rel = labels >= 0
+    Ur, rlab = U[rel], labels[rel].copy()
+    null = []
+    for _ in range(n_perm):
+        perm = rng.permutation(rlab)
+        mus, ok = {}, True
+        for c in cs:
+            m = perm == c
+            if not m.any():
+                ok = False; break
+            v = Ur[m].mean(0); mus[c] = v / (np.linalg.norm(v) + 1e-12)
+        if not ok:
+            continue
+        for i, a in enumerate(cs):
+            for b in cs[i + 1:]:
+                null.append(np.degrees(np.arccos(np.clip(mus[a] @ mus[b], -1, 1))))
+    null = np.array(null)
+    nm = float(null.mean()) if null.size else np.nan
+    for pair, info in obs.items():
+        d = info["angle_deg"]
+        p_sep = float(np.mean(null >= d)) if null.size else np.nan
+        p_align = float(np.mean(null <= d)) if null.size else np.nan
+        p2 = float(min(1.0, 2 * min(p_sep, p_align)))
+        info["p_more_separated"] = p_sep
+        info["p_more_aligned"] = p_align
+        info["p_two_sided"] = p2
+        if p2 < 0.05 and d > nm:
+            info["relationship"] = "more antipodal than chance"
+        elif p2 < 0.05 and d < nm:
+            info["relationship"] = "more aligned than chance"
+        else:
+            info["relationship"] = "consistent with high-D null (no special relationship)"
+    return cs, obs, {"null_mean_deg": nm,
+                     "null_std_deg": float(null.std()) if null.size else np.nan,
+                     "n_perm": int(n_perm)}
 
 
 def _plot(sweep, cs, ang, path, dpi):
@@ -122,11 +165,12 @@ def main(config: Config) -> str:
     kr = dp.get("k_range", config["cluster"]["k_range"])
     pcts = dp.get("robustness_percentiles", [40, 50, 60, 70, 80])
     sweep = auto_k_sweep(U, norm, dp, seed, pcts, kr)
-    cs, R, ang = centroid_angles(U, labels)
+    cs, R, _ = centroid_angles(U, labels)
+    _, ang, null_summary = angle_null_test(U, labels, int(dp.get("angle_null_perm", 2000)), seed)
 
     result = {"label_source": which, "auto_k_sweep": sweep,
               "phenotypes": cs, "resultant_length": {int(c): R[c] for c in cs},
-              "pairwise_angles": ang}
+              "angle_null": null_summary, "pairwise_angles": ang}
     io.write_json(result, config.out("phenotype_geometry.json"))
     _plot(sweep, cs, ang, config.out("phenotype_geometry.png"),
           int(config["report"]["fig_dpi"]))
@@ -134,8 +178,12 @@ def main(config: Config) -> str:
     print("[geometry] auto-k per threshold: " +
           ", ".join(f"p{r['percentile']}:sph_k={r['spherical_k']}/vmf_k={r['vmf_k']}"
                     for r in sweep))
+    print(f"[geometry] angle null: random directions ~{null_summary['null_mean_deg']:.0f} deg "
+          f"+/- {null_summary['null_std_deg']:.0f} (this is the 'orthogonal' baseline)")
     for pair, a in ang.items():
-        print(f"[geometry] phenotypes {pair}: {a['angle_deg']:.0f} deg -> {a['relationship']}")
+        flag = " **" if a["p_two_sided"] < 0.05 else ""
+        print(f"[geometry] phenotypes {pair}: {a['angle_deg']:.0f} deg "
+              f"(p2={a['p_two_sided']:.3f}) -> {a['relationship']}{flag}")
     print(f"[geometry] wrote phenotype_geometry.{{json,png}} to {config.output_dir}")
     return config.out("phenotype_geometry.json")
 
