@@ -81,43 +81,50 @@ def run(config: Config, start_from: str = "assemble") -> dict:
 
     # Gate routing.
     if invariants.should_proceed(gate):
-        print("\n[run_all] gate: PROCEED -> clustering branch")
-        from . import cluster, stability, qeeg, phenotype_stats, report, outlier_qc
-
+        print("\n[run_all] gate: PROCEED")
+        from . import outlier_qc
         print("\n=== Outlier QC (diagnostic) ===")
         outlier_qc.main(config)
-        print("\n=== Module 4: cluster ===")
-        cluster.main(config)
-        print("\n=== Module 5: stability ===")
-        stability.main(config)
 
-        # Module 6 (QEEG/FC): needs raw EEG. Auto-skip if unavailable.
-        run_qeeg = _resolve(config, "run_qeeg", _raw_eeg_available(config))
-        qeeg_ok = False
-        if run_qeeg:
-            print("\n=== Module 6: qeeg (functional connectivity) ===")
-            try:
-                qeeg.main(config)
-                qeeg_ok = True
-            except Exception as e:  # noqa: BLE001
-                print(f"[run_all] module 6 (qeeg) failed/skipped: {type(e).__name__}: {e}")
-        else:
-            print("\n[run_all] skipping module 6 (qeeg): no raw EEG at "
-                  f"{config.path('paths', 'raw_eeg_dir')}")
+        mode = str(config.get("run", {}).get("downstream", "trajectory"))
 
-        # Module 7 (phenotype stats): needs the clinical covariates AND QEEG features.
-        run_pheno = _resolve(config, "run_phenotype", _clinical_available(config))
-        if run_pheno and qeeg_ok:
-            print("\n=== Module 7: phenotype_stats ===")
-            phenotype_stats.main(config)
-        else:
-            why = "no clinical table" if not run_pheno else "QEEG features not produced"
-            print(f"\n[run_all] skipping module 7 (phenotype_stats): {why}. "
-                  "The covariate-adjusted comparison needs both the clinical "
-                  "covariates and QEEG features.")
+        # --- Trajectory eval (default): clusterability + direction x magnitude ---
+        if mode in ("trajectory", "both"):
+            from . import trajectory_eval
+            print("\n=== Trajectory eval (clusterability + direction x magnitude) ===")
+            trajectory_eval.main(config)
 
-        print("\n=== Module 8: report ===")
-        report.main(config)
+        # --- Hard clustering branch (kept but disabled by default) ---
+        if mode in ("clustering", "both"):
+            from . import cluster, stability, qeeg, phenotype_stats, report
+            print("\n=== Module 4: cluster ===")
+            cluster.main(config)
+            print("\n=== Module 5: stability ===")
+            stability.main(config)
+
+            run_qeeg = _resolve(config, "run_qeeg", _raw_eeg_available(config))
+            qeeg_ok = False
+            if run_qeeg:
+                print("\n=== Module 6: qeeg (functional connectivity) ===")
+                try:
+                    qeeg.main(config)
+                    qeeg_ok = True
+                except Exception as e:  # noqa: BLE001
+                    print(f"[run_all] module 6 (qeeg) failed/skipped: {type(e).__name__}: {e}")
+            else:
+                print("\n[run_all] skipping module 6 (qeeg): no raw EEG at "
+                      f"{config.path('paths', 'raw_eeg_dir')}")
+
+            run_pheno = _resolve(config, "run_phenotype", _clinical_available(config))
+            if run_pheno and qeeg_ok:
+                print("\n=== Module 7: phenotype_stats ===")
+                phenotype_stats.main(config)
+            else:
+                why = "no clinical table" if not run_pheno else "QEEG features not produced"
+                print(f"\n[run_all] skipping module 7 (phenotype_stats): {why}.")
+
+            print("\n=== Module 8: report ===")
+            report.main(config)
     else:
         print("\n[run_all] gate: STOP -> graded_score branch")
         from . import graded_score
