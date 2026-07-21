@@ -197,6 +197,27 @@ def test_reliability_split_drops_low_magnitude():
     assert reliable[20:].all() and not reliable[:20].any()        # keeps only the high
 
 
+def test_centroid_angles_and_autok():
+    from analysis.phenotype_geometry import centroid_angles, auto_k_sweep, _unit
+    rng = np.random.default_rng(0); D = 8
+    mu = _unit(rng.normal(size=(1, D)))[0]
+    U, lab = [], []
+    for _ in range(12):
+        U.append(mu + rng.normal(0, 0.05, D)); lab.append(0)
+    for _ in range(12):
+        U.append(-mu + rng.normal(0, 0.05, D)); lab.append(1)   # antipodal
+    U = _unit(np.array(U)); lab = np.array(lab)
+    cs, R, ang = centroid_angles(U, lab)
+    assert ang["0-1"]["angle_deg"] > 150                        # detected antipodal
+    assert R[0] > 0.9 and R[1] > 0.9                            # concentrated
+    # auto-k sweep runs and returns per-threshold selections
+    norm = np.full(len(U), 5.0)
+    sweep = auto_k_sweep(U, norm, {"direction_dims": 6, "direction_var": 0.9,
+                                   "vmf_n_init": 3, "vmf_max_iter": 40},
+                         0, [50, 80], [2, 4])
+    assert all("spherical_k" in r and "vmf_k" in r for r in sweep)
+
+
 def test_runall_skip_helpers():
     with tempfile.TemporaryDirectory() as root:
         cfg = _cfg(root)
