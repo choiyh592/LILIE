@@ -339,6 +339,12 @@ def main(config: Config) -> str:
     }
     io.write_json(result, config.out("phenotype_compass.json"))
 
+    # single source of truth for the validated axis coordinate (used by axis_qeeg)
+    pd.DataFrame({"progression_id": pid, "axis_coord": axis_coord, "magnitude": norm,
+                  "is_reliable": reliable,
+                  "pole": np.where(axis_coord >= 0, "pole0", "pole1")}
+                 ).to_csv(config.out("phenotype_axis.csv"), index=False)
+
     print(f"[compass] framing={'BIPOLAR-AXIS (diverging)' if diverging else 'categorical'}; "
           f"palette=Okabe-Ito")
     if axis_json:
