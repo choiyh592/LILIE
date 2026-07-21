@@ -153,6 +153,24 @@ def test_directional_recovers_direction_groups():
     assert ari_sp > ari_eu + 0.3                         # and clearly beats magnitude
 
 
+def test_clusterability_discrete_vs_continuum():
+    from analysis.trajectory_eval import clusterability, _unit
+    rng = np.random.default_rng(0)
+    D = 8
+    # discrete: 3 tight vMF-like blobs of directions
+    dirs = _unit(rng.normal(size=(3, D)))
+    disc = np.vstack([d + rng.normal(0, 0.05, (25, D)) for d in dirs])
+    vd, _ = clusterability(_unit(disc)[:, :6], kmax=6, seed=0)
+    assert vd["verdict"] in ("discrete", "weak")          # structure detected
+    # continuum: directions spread smoothly around a great circle
+    t = np.linspace(0, np.pi, 75)
+    cont = np.zeros((75, D)); cont[:, 0] = np.cos(t); cont[:, 1] = np.sin(t)
+    cont += rng.normal(0, 0.02, (75, D))
+    vc, _ = clusterability(_unit(cont)[:, :6], kmax=6, seed=0)
+    # a smooth arc should look less discrete than 3 tight blobs
+    assert vc["votes_for_discrete"] <= vd["votes_for_discrete"]
+
+
 def test_runall_skip_helpers():
     with tempfile.TemporaryDirectory() as root:
         cfg = _cfg(root)

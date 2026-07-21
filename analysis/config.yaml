@@ -126,8 +126,13 @@ run:
   # Stop after module 3 so the explained-variance curve can be inspected before
   # committing to clustering. Set false to let the gate itself route 3 -> 4..8.
   stop_at_gate: false
-  # Module 6/7 gating. null = auto-detect (module 6 runs iff raw EEG exists;
-  # module 7 runs iff a clinical table exists). true/false to force.
+  # Downstream after the gate:
+  #   trajectory - clusterability test + direction x magnitude map (DEFAULT)
+  #   clustering - the hard-clustering path (modules 4-8); kept but OFF for now
+  #   both       - run both
+  # Flip to "clustering" to revert to the k-means/GMM phenotype path.
+  downstream: trajectory
+  # Module 6/7 gating (clustering path only). null = auto-detect.
   run_qeeg: null
   run_phenotype: null
 
