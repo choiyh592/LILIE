@@ -171,6 +171,32 @@ def test_clusterability_discrete_vs_continuum():
     assert vc["votes_for_discrete"] <= vd["votes_for_discrete"]
 
 
+def test_vmf_and_spherical_recover_directions():
+    from analysis.directional_phenotype import vmf_select, spherical_select, _unit
+    from sklearn.metrics import adjusted_rand_score
+    rng = np.random.default_rng(0)
+    D = 8
+    mus = _unit(rng.normal(size=(3, D)))
+    X, true = [], []
+    for i, mu in enumerate(mus):
+        pts = mu + rng.normal(0, 0.12, (20, D))          # concentrated around mu
+        X.append(_unit(pts)); true += [i] * 20
+    X = _unit(np.vstack(X)); true = np.array(true)
+    vk, _, vfit = vmf_select(X, [2, 6], seed=0, n_init=4, max_iter=80)
+    sk, _, slab = spherical_select(X, [2, 6], seed=0)
+    assert vk == 3 and sk == 3                            # both recover 3 directions
+    assert adjusted_rand_score(true, vfit["labels"]) > 0.9
+    assert adjusted_rand_score(true, slab) > 0.9
+
+
+def test_reliability_split_drops_low_magnitude():
+    from analysis.directional_phenotype import reliability_split
+    norm = np.concatenate([np.full(20, 0.1), np.full(20, 5.0)])   # low + high
+    spread = np.zeros(40)
+    reliable, cut = reliability_split(norm, spread, {"reliable_magnitude_percentile": 50})
+    assert reliable[20:].all() and not reliable[:20].any()        # keeps only the high
+
+
 def test_runall_skip_helpers():
     with tempfile.TemporaryDirectory() as root:
         cfg = _cfg(root)

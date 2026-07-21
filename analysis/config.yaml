@@ -8,9 +8,9 @@ paths:
   # Embeddings metadata: one row per segment, columns `group_name`
   # ("ID_YYYY_MM_DD_...") and `dataset_idx`. This is the file consumed by
   # create_data_splits and LongitudinalEEGDataset.
-  metadata_csv: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_metadata.csv
+  metadata_csv: /path/to/Embeddings/metadata.csv
   # Memory-mapped .npy of segment embeddings, indexed by `dataset_idx`.
-  embeddings_npy: /home/won_ju_kim/yhchoi/Leqembi_260716/Embeddings_LaBraM/test_embeddings.npy
+  embeddings_npy: /path/to/Embeddings/embeddings.npy
   # Clinical/demographic table (NEW - not in the repo metadata). One row per
   # (patient, session_date) with the covariates below. See `clinical` block.
   # Leave as `null` if you don't have it yet: modules 1-3 (through the scree
@@ -18,15 +18,15 @@ paths:
   # (phenotype_stats) needs them.
   clinical_csv: null
   # Preprocessed raw EEG root (module 6, qeeg). One recording per session.
-  raw_eeg_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Preprocessed/Leqembi
+  raw_eeg_dir: /path/to/preprocessed_raw
 
   # --- Working / output ------------------------------------------------------
-  splits_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260720/splits         # create_data_splits writes fold CSVs here
-  output_dir: /home/won_ju_kim/yhchoi/Leqembi_260716/Exp_260720/out            # all intermediate + final artifacts
+  splits_dir: ./_work/splits         # create_data_splits writes fold CSVs here
+  output_dir: ./_work/out            # all intermediate + final artifacts
 
 # Where the reused repo modules live relative to run cwd. run_all inserts this
 # on sys.path so `from dataset.datasets import ...` resolves. "." = repo root.
-repo_root: "/home/won_ju_kim/yhchoi/Leqembi_260716/LILIE"
+repo_root: "."
 
 seed: 42
 
@@ -58,12 +58,12 @@ assemble:
 delta:
   # LILIE pooler. Primary = Delta. In the repo Delta is selected by
   # pool_method "Linear" or "Raw"; "Attentive" -> AttentiveDelta, "NN" -> NNDelta.
-  pool_method: Attentive             # PRIMARY (Delta)
+  pool_method: Linear             # PRIMARY (Delta)
   sensitivity_pool_methods: [Attentive, NN]   # config-switchable variants
-  clf_method: NN
-  input_dim: 200
-  embedding_size: 200
-  n_draws: 20                      # segment-pair draws per date (augmentation)
+  clf_method: Linear
+  input_dim: 256
+  embedding_size: 256
+  n_draws: 5                      # segment-pair draws per date (augmentation)
   batch_size: 32
   num_workers: 4
   max_epochs: 200
@@ -72,21 +72,21 @@ delta:
                                   # (~7 here) to log within these small epochs
   # Optimizer override for LILIE's hardcoded AdamW(lr=1e-5, wd=5e-4). The default
   # 1e-5 is very low for this small dataset; try lr ~ 3.0e-4. null = model default.
-  lr: 3.0e-4                        # e.g. 3.0e-4
+  lr: null                        # e.g. 3.0e-4
   weight_decay: 5.0e-4
-  lr_scheduler: cosine              # none | cosine (cosine decay over max_epochs)
-  warmup_epochs: 5                # linear warmup epochs before cosine decay
+  lr_scheduler: none              # none | cosine (cosine decay over max_epochs)
+  warmup_epochs: 0                # linear warmup epochs before cosine decay
   # Early stopping on the held-out ordering metric; the BEST epoch is restored
   # for delta extraction. Lets you raise n_draws / max_epochs safely.
   early_stopping: true
   es_monitor: val_auroc           # val_auroc (mode max) or val_loss (mode min)
   es_mode: max
   es_patience: 25                 # epochs without improvement before stopping
-  es_min_delta: 0.00001
-  accelerator: gpu               # cpu / gpu / auto
+  es_min_delta: 0.0
+  accelerator: auto               # cpu / gpu / auto
   devices: 1                      # SINGLE device only - multi-GPU DDP re-launches
                                   # the whole run_all script per process (breaks it)
-  device_index: 3                 # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
+  device_index: null              # pin a specific GPU: 0 -> cuda:0, 2 -> cuda:2, etc.
                                   # null = default single device. Overrides `devices`.
                                   # CLI --device N overrides this.
   # Per-progression delta: how many before x after segment pairs to aggregate.
@@ -111,7 +111,7 @@ reduce:
   #   zvec - per-vector z-score: center each delta + scale to unit variance
   #          (like L2 but also strips each vector's mean/DC component)
   #   none - keep magnitude (magnitude-based analysis)
-  normalize: zvec                 # none | unit | zvec
+  normalize: unit                 # none | unit | zvec
   max_components: null            # null = min(n_progressions, n_dims)
   gate:
     min_components_above_floor: 2 # >=2 signal components -> proceed
@@ -126,12 +126,12 @@ run:
   # Stop after module 3 so the explained-variance curve can be inspected before
   # committing to clustering. Set false to let the gate itself route 3 -> 4..8.
   stop_at_gate: false
-  # Downstream after the gate:
-  #   trajectory - clusterability test + direction x magnitude map (DEFAULT)
-  #   clustering - the hard-clustering path (modules 4-8); kept but OFF for now
-  #   both       - run both
-  # Flip to "clustering" to revert to the k-means/GMM phenotype path.
-  downstream: trajectory
+  # Downstream after the gate. A list (or comma-string) of steps to run:
+  #   directional - reliability split + vMF & spherical directional phenotyping (DEFAULT)
+  #   trajectory  - clusterability test + direction x magnitude map
+  #   clustering  - the hard k-means/GMM path (modules 4-8); kept but OFF
+  # All prior work is intact; just add its name to run it.
+  downstream: [directional]
   # Module 6/7 gating (clustering path only). null = auto-detect.
   run_qeeg: null
   run_phenotype: null
@@ -141,7 +141,7 @@ run:
 # -----------------------------------------------------------------------------
 cluster:
   algorithms: [kmeans, gmm]       # kmeans primary, gmm sensitivity
-  k_range: [2, 9]
+  k_range: [2, 6]
   k_selection: [silhouette, gap]  # favor small k; NOT downstream separation
   # cosine = spherical k-means on unit-normalized PC scores (directional).
   # Pairs with reduce.normalize=unit for a fully directional analysis.
@@ -153,13 +153,22 @@ cluster:
   outlier_n_neighbors: 20             # LOF neighborhood size
   outlier_quantile: 0.975             # mahalanobis-only: chi-square cutoff
 
+directional_phenotype:
+  reliable_magnitude_percentile: 50   # keep progressions with |delta| above this pct
+  max_spread_percentile: null         # optional: also drop high-spread (unreliable) deltas
+  direction_var: 0.90                 # keep PCs up to this cumulative directional variance
+  direction_dims: 10                  # hard cap on direction PCs (vMF overfits noise dims)
+  k_range: [2, 6]
+  vmf_n_init: 5
+  vmf_max_iter: 100
+
 stability:
   n_bootstrap: 1000
   jaccard_flag_below: 0.60
   sensitivity: [pool_method, k_pm1, kmeans_vs_gmm]
 
 qeeg:
-  fs: 200                       # sampling rate (Hz); null = read from raw
+  fs: null                        # sampling rate (Hz); null = read from raw
   bands:
     delta: [1, 4]
     theta: [4, 8]

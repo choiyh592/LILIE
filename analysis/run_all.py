@@ -54,6 +54,17 @@ def _resolve(config: Config, key: str, auto_default: bool) -> bool:
     return auto_default if val is None else bool(val)
 
 
+def _downstream_steps(config: Config) -> set:
+    """run.downstream may be a list, a comma-string, or a single value.
+    Legacy: "both" == trajectory + clustering."""
+    ds = config.get("run", {}).get("downstream", "directional")
+    if isinstance(ds, str):
+        if ds == "both":
+            return {"trajectory", "clustering"}
+        return {s.strip() for s in ds.split(",") if s.strip()}
+    return set(ds)
+
+
 def run(config: Config, start_from: str = "assemble") -> dict:
     _ensure_repo_on_path(config)
     order = STEPS_PRE_GATE
@@ -82,21 +93,26 @@ def run(config: Config, start_from: str = "assemble") -> dict:
     # Gate routing.
     if invariants.should_proceed(gate):
         print("\n[run_all] gate: PROCEED")
-        from . import outlier_qc
-        print("\n=== Outlier QC (diagnostic) ===")
-        outlier_qc.main(config)
+        steps = _downstream_steps(config)
+        print(f"[run_all] downstream steps: {sorted(steps)}")
 
-        mode = str(config.get("run", {}).get("downstream", "trajectory"))
+        # --- Directional phenotyping (default): reliable-direction vMF + spherical ---
+        if "directional" in steps:
+            from . import directional_phenotype
+            print("\n=== Directional phenotyping (vMF + spherical) ===")
+            directional_phenotype.main(config)
 
-        # --- Trajectory eval (default): clusterability + direction x magnitude ---
-        if mode in ("trajectory", "both"):
+        # --- Trajectory eval: clusterability + direction x magnitude ---
+        if "trajectory" in steps:
             from . import trajectory_eval
             print("\n=== Trajectory eval (clusterability + direction x magnitude) ===")
             trajectory_eval.main(config)
 
         # --- Hard clustering branch (kept but disabled by default) ---
-        if mode in ("clustering", "both"):
-            from . import cluster, stability, qeeg, phenotype_stats, report
+        if "clustering" in steps:
+            from . import outlier_qc, cluster, stability, qeeg, phenotype_stats, report
+            print("\n=== Outlier QC (diagnostic) ===")
+            outlier_qc.main(config)
             print("\n=== Module 4: cluster ===")
             cluster.main(config)
             print("\n=== Module 5: stability ===")
