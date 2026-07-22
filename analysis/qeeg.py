@@ -1,17 +1,20 @@
 """Module 6 - qeeg: QEEG features from preprocessed raw EEG.
 
-IMPLEMENTED: functional connectivity (VC-robust wPLI / imaginary coherence) plus
-graph-theoretic summaries, per session, expressed as BOTH a baseline value and a
-within-progression delta, keyed by progression_id (invariant 3).
-
-SCAFFOLD (TODO): spectral-power / PAF / slowing-ratio / entropy features.
+IMPLEMENTED: (a) functional connectivity (VC-robust wPLI / imaginary coherence)
+plus graph-theoretic summaries, and (b) spectral-power features (log band power,
+relative power, slowing ratio, alpha centre-of-gravity + aperiodic-flattened PAF,
+median frequency, SEF95, spectral entropy, aperiodic 1/f exponent), all computed
+within an analysis band (``qeeg.analysis_band``, default [1,45] Hz). Every feature
+is emitted as BOTH a baseline value and a within-progression delta, keyed by
+progression_id (invariant 3).
 
 Raw EEG loading supports MNE ``.fif`` (sampling rate + channel names read from
 the file), a per-session ``.npy``, or an HDF5 store. For ``.fif`` the session is
 matched by prefix ``{patient_id}_{YYYY}_{MM}_{DD}_*.fif`` (the recording's
 timestamp suffix is ignored).
 
-Output (paths.output_dir): qeeg_connectivity.parquet|csv keyed by progression_id.
+Output (paths.output_dir): qeeg_connectivity.parquet|csv keyed by progression_id
+(name retained for back-compat; the table now carries spectral features too).
 
 Run:  python -m analysis.qeeg --config analysis/config.yaml
 """
@@ -56,9 +59,11 @@ def session_features(eeg: np.ndarray, fs: float, ch_names, config: Config) -> di
             feats[f"{pref}_posterior"] = fc.submatrix_mean(W, post_idx)
             for mname, val in fc.graph_metrics(W, q["graph_metrics"]).items():
                 feats[f"graph_{pref}_{mname}"] = val
-    # spectral / power features (relative power, slowing ratio, PAF, SEF95, entropy)
+    # spectral / power features (in-band; log power, slowing ratio, alpha CoG, PAF,
+    # median freq, SEF95, entropy, aperiodic exponent)
     if q.get("spectral", True):
-        feats.update(sp.spectral_features(eeg, fs, bands, post_idx))
+        ab = q.get("analysis_band", (1.0, 45.0))
+        feats.update(sp.spectral_features(eeg, fs, bands, post_idx, analysis_band=ab))
     return feats
 
 
@@ -155,8 +160,8 @@ def main(config: Config):
     out_df = pd.DataFrame(rows)
     invariants.assert_progression_unit(len(out_df), out_df["progression_id"].tolist())
     out_path = io.write_table(out_df, config.out("qeeg_connectivity"))
-    print(f"[qeeg] {len(out_df)} progressions x {out_df.shape[1] - 2} FC features "
-          f"-> {out_path}")
+    print(f"[qeeg] {len(out_df)} progressions x {out_df.shape[1] - 2} QEEG features "
+          f"(connectivity + spectral) -> {out_path}")
     return out_path
 
 

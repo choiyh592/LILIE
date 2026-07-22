@@ -1,15 +1,19 @@
 """Spectral / power QEEG features (the plan's non-connectivity primaries).
 
-Per session, from Welch PSD:
-  - absolute + relative band power (all bands), global and posterior
-  - relative alpha power (posterior) and relative theta - plan primaries
+Per session, from Welch PSD, all computed within an ANALYSIS BAND (default
+[1, 45] Hz) so session-level nuisance outside the bands of interest (sub-1 Hz
+drift, 45-75 Hz EMG range, filter roll-off, residual line noise) does not
+contaminate the relative-power denominators, SEF95, or spectral entropy:
+
+  - absolute (log10) + relative band power (all bands), global and posterior
   - (delta+theta)/(alpha+beta) slowing ratio (global + posterior)
-  - peak alpha frequency (PAF), global + posterior
-  - theta/alpha ratio, median frequency, SEF95, spectral entropy
+  - alpha centre-of-gravity (primary) and aperiodic-flattened peak alpha freq
+    (secondary; NaN when no resolvable peak) - both global + posterior
+  - theta/alpha ratio, median frequency, SEF95, spectral entropy (in-band)
+  - aperiodic (1/f) exponent + offset
 
 Feature names are shared with the connectivity block (qeeg.session_features
-merges both); baseline + within-progression delta are added downstream.
-scipy only.
+merges both); baseline + within-progression delta are added downstream. scipy only.
 """
 from __future__ import annotations
 
@@ -40,7 +44,9 @@ def _aperiodic(f, P, fmin=2.0, fmax=40.0, n_iter=3):
 
     Lightweight specparam-style fit: OLS of log10(PSD) on log10(f) over [fmin,fmax]
     with iterative masking of points that sit ABOVE the fit (oscillatory peaks), so
-    alpha/beta bumps don't bias the aperiodic slope. Returns (exponent[C], offset[C]).
+    alpha/beta bumps don't bias the slope. Returns (exponent[C], offset[C]) where the
+    per-channel log-log fit is  log10(P) ~ offset - exponent*log10(f)  (offset is the
+    intercept, so the fitted line is reusable for PAF flattening).
     """
     m = (f >= fmin) & (f <= fmax) & (f > 0)
     if m.sum() < 6:
@@ -59,55 +65,104 @@ def _aperiodic(f, P, fmin=2.0, fmax=40.0, n_iter=3):
                 keep = np.ones(len(lf), bool); break
             b = np.polyfit(lf[keep], lp[keep], 1)
         exps.append(-float(b[0]))                        # exponent = -slope (positive)
-        offs.append(float(b[1]))
+        offs.append(float(b[1]))                         # intercept
     return np.array(exps), np.array(offs)
 
 
-def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx) -> dict:
+def _resolve_beta(bands):
+    return [k for k in bands if k.startswith("beta")]
+
+
+def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx,
+                      analysis_band=(1.0, 45.0)) -> dict:
+    # --- band-name guard (1.4): raise, do not silently degrade ---
+    required = ("delta", "theta", "alpha")
+    missing = [b for b in required if b not in bands]
+    if missing:
+        raise ValueError(f"spectral_features: config bands missing {missing}; "
+                         f"have {list(bands)}")
+    beta_keys = _resolve_beta(bands)
+    if not beta_keys:
+        raise ValueError("spectral_features: no 'beta*' band in config for the "
+                         "slowing-ratio denominator.")
+
     f, P = _psd(eeg, fs)
-    total = _trapz(P, f, axis=1) + 1e-20                # [C]
+    ab0, ab1 = float(analysis_band[0]), float(analysis_band[1])
+    mb = (f >= ab0) & (f <= ab1)
+    if mb.sum() < 4:
+        raise ValueError(f"analysis_band {analysis_band} yields <4 PSD bins.")
+    fb, Pb = f[mb], P[:, mb]
+    total = _trapz(Pb, fb, axis=1) + 1e-20              # [C], within analysis band
+
     feats: dict = {}
-    absp = {}
+    absp = {}                                           # RAW band power (for ratios)
     for bn, br in bands.items():
         bp = _bandpow(f, P, br)
         absp[bn] = bp
         rel = bp / total
-        feats[f"abs_{bn}_global"] = float(bp.mean())
+        feats[f"abs_{bn}_global"] = float(np.log10(bp + 1e-20).mean())   # (1.3) log power
         feats[f"rel_{bn}_global"] = float(rel.mean())
         if post_idx:
             feats[f"rel_{bn}_posterior"] = float(rel[post_idx].mean())
 
-    # slowing ratio (delta+theta)/(alpha+beta)
-    num = absp.get("delta", 0) + absp.get("theta", 0)
-    den = absp.get("alpha", 0) + absp.get("beta1", 0) + absp.get("beta2", 0) + 1e-20
+    # slowing ratio (delta+theta)/(alpha + all beta*) -- raw powers
+    num = absp["delta"] + absp["theta"]
+    den = absp["alpha"] + sum(absp[k] for k in beta_keys) + 1e-20
     sr = num / den
     feats["slowing_ratio_global"] = float(np.mean(sr))
     if post_idx:
         feats["slowing_ratio_posterior"] = float(np.mean(sr[post_idx]))
 
-    # theta/alpha
-    ta = absp.get("theta", 0) / (absp.get("alpha", 1e-20) + 1e-20)
+    # theta/alpha (raw)
+    ta = absp["theta"] / (absp["alpha"] + 1e-20)
     feats["theta_alpha_global"] = float(np.mean(ta))
 
-    # peak alpha frequency
+    # aperiodic fit FIRST (reused by PAF flattening)
+    exp_, off_ = _aperiodic(f, P)
+
+    # alpha centre-of-gravity (primary) + aperiodic-flattened PAF (secondary)
     am = (f >= bands["alpha"][0]) & (f <= bands["alpha"][1])
     if am.any():
         fa = f[am]
-        paf = fa[np.argmax(P[:, am], axis=1)]
-        feats["paf_global"] = float(paf.mean())
+        Pa = P[:, am]
+        cog = (fa[None, :] * Pa).sum(1) / (Pa.sum(1) + 1e-30)          # [C]
+        feats["alpha_cog_global"] = float(cog.mean())
         if post_idx:
-            feats["paf_posterior"] = float(paf[post_idx].mean())
+            feats["alpha_cog_posterior"] = float(cog[post_idx].mean())
+        # flattened peak: subtract aperiodic fit, peak-pick residual. Accept only a
+        # PROMINENT interior peak (height > peak_sd * in-band residual SD), else NaN,
+        # so channels without a resolvable alpha peak do not return a spurious bin.
+        peak_sd = 2.5
+        lf_all = np.log10(np.where(f > 0, f, np.nan))
+        paf = np.full(P.shape[0], np.nan)
+        for c in range(P.shape[0]):
+            if not np.isfinite(exp_[c]):
+                continue
+            fit_c = off_[c] - exp_[c] * lf_all                        # log10 aperiodic line
+            resid = np.log10(P[c] + 1e-30) - fit_c
+            band_sd = np.nanstd(resid[mb]) + 1e-12
+            ra = resid[am]
+            j = int(np.nanargmax(ra))
+            if j == 0 or j == len(ra) - 1:                            # edge -> no peak
+                continue
+            if ra[j] < peak_sd * band_sd:                            # not prominent -> unresolved
+                continue
+            paf[c] = fa[j]
+        feats["paf_nan_frac_global"] = float(np.mean(~np.isfinite(paf)))
+        if np.isfinite(paf).any():
+            feats["paf_global"] = float(np.nanmean(paf))
+            if post_idx and np.isfinite(paf[post_idx]).any():
+                feats["paf_posterior"] = float(np.nanmean(paf[post_idx]))
 
-    # median freq, SEF95, spectral entropy (channel-averaged)
-    csum = np.cumsum(P, axis=1) / (P.sum(axis=1, keepdims=True) + 1e-20)
-    feats["median_freq_global"] = float(f[np.argmax(csum >= 0.5, axis=1)].mean())
-    feats["sef95_global"] = float(f[np.argmax(csum >= 0.95, axis=1)].mean())
-    Pn = P / (P.sum(axis=1, keepdims=True) + 1e-20)
-    ent = -np.sum(Pn * np.log(Pn + 1e-20), axis=1) / np.log(P.shape[1])
+    # median freq, SEF95, spectral entropy -- WITHIN analysis band
+    csum = np.cumsum(Pb, axis=1) / (Pb.sum(axis=1, keepdims=True) + 1e-20)
+    feats["median_freq_global"] = float(fb[np.argmax(csum >= 0.5, axis=1)].mean())
+    feats["sef95_global"] = float(fb[np.argmax(csum >= 0.95, axis=1)].mean())
+    Pn = Pb / (Pb.sum(axis=1, keepdims=True) + 1e-20)
+    ent = -np.sum(Pn * np.log(Pn + 1e-20), axis=1) / np.log(Pb.shape[1])
     feats["spectral_entropy_global"] = float(ent.mean())
 
     # aperiodic (1/f) exponent + offset - the spectral-tilt / E-I-proxy component
-    exp_, off_ = _aperiodic(f, P)
     if np.isfinite(exp_).any():
         feats["aperiodic_exponent_global"] = float(np.nanmean(exp_))
         feats["aperiodic_offset_global"] = float(np.nanmean(off_))

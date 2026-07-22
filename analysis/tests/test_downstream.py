@@ -231,6 +231,39 @@ def test_runall_skip_helpers():
         assert run_all._resolve(cfg, "run_qeeg", False) is True
 
 
+def test_spectral_features_inband_paf_and_guards():
+    """Analysis-band restriction (rel_* tile to ~1), aperiodic-flattened PAF recovers
+    a real peak while pure-1/f channels NaN out, and band-name guards raise."""
+    from analysis import spectral as sp
+    rng = np.random.default_rng(0)
+    fs, N, C = 200, 200 * 30, 8
+    freqs = np.fft.rfftfreq(N, 1 / fs)
+    amp = np.zeros_like(freqs); amp[1:] = freqs[1:] ** (-1.2 / 2)
+    eeg = np.zeros((C, N))
+    for c in range(C):
+        x = np.fft.irfft(amp * np.exp(1j * rng.uniform(0, 2 * np.pi, len(freqs))), N)
+        if c < 4:                                          # half get a real 10.5 Hz peak
+            x = x / x.std() + 2.5 * np.sin(2 * np.pi * 10.5 * np.arange(N) / fs)
+        eeg[c] = x
+    bands = {"delta": [1, 4], "theta": [4, 8], "alpha": [8, 13], "alpha1": [8, 10],
+             "alpha2": [10, 13], "beta1": [13, 20], "beta2": [20, 30], "gamma": [30, 45]}
+    f = sp.spectral_features(eeg, fs, bands, [4, 5, 6, 7], analysis_band=(1, 45))
+    tile = ["delta", "theta", "alpha", "beta1", "beta2", "gamma"]
+    assert abs(sum(f[f"rel_{b}_global"] for b in tile) - 1.0) < 0.02     # rel_* tile to 1
+    assert 1 < f["sef95_global"] <= 45                                   # SEF95 in band
+    assert abs(f["paf_global"] - 10.5) < 1.0                             # PAF recovers peak
+    assert abs(f["alpha_cog_global"] - 10.5) < 1.5                       # CoG robust primary
+    assert 0.0 <= f["paf_nan_frac_global"] <= 1.0
+    assert abs(f["aperiodic_exponent_global"] - 1.2) < 0.3               # 1/f recovered
+    # guards: missing alpha / missing beta must raise, not silently degrade
+    for bad in ({"delta": [1, 4], "theta": [4, 8]},
+                {"delta": [1, 4], "theta": [4, 8], "alpha": [8, 13]}):
+        try:
+            sp.spectral_features(eeg, fs, bad, None); assert False, "guard did not raise"
+        except ValueError:
+            pass
+
+
 def _run():
     fns = {k: v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)}

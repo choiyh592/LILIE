@@ -162,17 +162,37 @@ def main(config: Config):
     delta_feats = [c for c in fc_cols if c.endswith("_delta")]
     base_feats = [c for c in fc_cols if c.endswith("_baseline")]
 
+    # PRE-SPECIFIED PRIMARY FAMILY (Phase 3). FDR is applied WITHIN this small set of
+    # established AD qEEG markers only; everything else is reported secondary and
+    # explicitly uncorrected. Target claim: "the axis is not explained by pre-specified
+    # markers" - not "nothing survived out of ~100 tests". Config-overridable.
+    PRIMARY_DEFAULT = ["median_freq_global", "rel_alpha_posterior", "rel_theta_global",
+                       "slowing_ratio_posterior", "alpha_cog_global",
+                       "aperiodic_exponent_global", "wpli_alpha_global",
+                       "wpli_alpha_posterior", "graph_wpli_alpha_global_efficiency"]
+    prim_base = ps.get("axis_primary_features", PRIMARY_DEFAULT)
+    primary_cols = {f"{b}_delta" for b in prim_base}
+    present_primary = [c for c in primary_cols if c in delta_feats]
+    missing_primary = sorted(primary_cols - set(delta_feats))
+
     res_delta = [_test_feature(dft, f, "axis_coord", covars, "patient_id", n_perm, seed)
                  for f in delta_feats]
-    # BH-FDR on the cluster-robust p across the change-feature family
-    pv = np.array([r["p_cluster"] for r in res_delta], float)
+    for r in res_delta:
+        r["family"] = "primary" if r["feature"] in primary_cols else "secondary"
+
+    # BH-FDR WITHIN the primary family only
+    prim = [r for r in res_delta if r["family"] == "primary"]
+    pv = np.array([r["p_cluster"] for r in prim], float)
     ok = ~np.isnan(pv); rej = np.zeros(len(pv), bool); q = np.full(len(pv), np.nan)
     if ok.any():
         rj, qq = benjamini_hochberg(pv[ok], alpha=float(ps.get("fdr_alpha", 0.05)))
         rej[ok] = rj; q[ok] = qq
-    for i, r in enumerate(res_delta):
+    for i, r in enumerate(prim):
         r["q_value"] = float(q[i]) if not np.isnan(q[i]) else None
         r["fdr_significant"] = bool(rej[i])
+    for r in res_delta:                                 # secondary: uncorrected, no q
+        if r["family"] == "secondary":
+            r["q_value"] = None; r["fdr_significant"] = False
     res_base = [{**_test_feature(dft, f, "axis_coord", covars, "patient_id", n_perm, seed),
                  "family": "baseline"} for f in base_feats]
 
@@ -215,28 +235,35 @@ def main(config: Config):
     io.write_json({
         "note": "Continuous axis (PC1) vs QEEG. RELIABLE subset only; magnitude+dt "
                 "controlled; patient-clustered (cluster-robust OLS SE) + patient-block "
-                "permutation companion; BH-FDR across change features. EMG-prone "
-                "(gamma/beta2) flagged. NOT circular (QEEG independent of embeddings). "
-                "Confirmatory clinical test still pending.",
+                "permutation companion. BH-FDR is applied WITHIN a PRE-SPECIFIED PRIMARY "
+                "FAMILY of established AD qEEG markers; all other features are SECONDARY "
+                "and uncorrected. EMG-prone (gamma/beta2) flagged. NOT circular (QEEG "
+                "independent of embeddings). Confirmatory clinical test still pending.",
         "n_reliable_tested": int(len(dft)),
         "n_patients": int(dft["patient_id"].nunique()),
         "covariates": covars, "fdr_alpha": float(ps.get("fdr_alpha", 0.05)),
-        "n_change_features": len(delta_feats),
-        "n_fdr_significant": n_sig,
+        "primary_family": sorted(present_primary),
+        "primary_family_missing_from_table": missing_primary,
+        "n_primary_tested": len(prim), "n_secondary_uncorrected": len(delta_feats) - len(prim),
+        "n_primary_fdr_significant": n_sig,
         "n_clean_survivors_non_emg_perm_ok": len(clean),
         "clean_survivors": [{"feature": r["feature"], "beta": r["beta"],
                              "p_cluster": r["p_cluster"], "q_value": r["q_value"],
                              "p_perm": r["p_perm"], "spearman_r": r["spearman_r"]}
                             for r in clean],
-        "uncorrected_hits": [{"feature": r["feature"], "beta": r["beta"],
+        "primary_results": [r for r in res_delta if r["family"] == "primary"],
+        "secondary_uncorrected_hits": [{"feature": r["feature"], "beta": r["beta"],
                               "p_cluster": _pc(r), "emg_prone": r["emg_prone"],
-                              "p_perm": r["p_perm"]} for r in uncorr[:15]],
+                              "p_perm": r["p_perm"]} for r in uncorr if r["family"] == "secondary"][:15],
         "change_features": res_delta, "baseline_features": res_base,
     }, config.out("axis_qeeg.json"))
 
+    if missing_primary:
+        print(f"[axis_qeeg] NOTE: {len(missing_primary)} primary features not in table "
+              f"(re-run qeeg after spectral.py update?): {missing_primary}")
     print(f"[axis_qeeg] {len(dft)} reliable progressions / {dft['patient_id'].nunique()} patients; "
-          f"{len(delta_feats)} change features tested (magnitude+dt adjusted, patient-clustered).")
-    print(f"[axis_qeeg] {n_sig} FDR-significant; {len(clean)} clean (non-EMG & permutation-ok).")
+          f"{len(prim)} PRIMARY (FDR) + {len(delta_feats)-len(prim)} secondary (uncorrected).")
+    print(f"[axis_qeeg] {n_sig} primary FDR-significant; {len(clean)} clean (non-EMG & permutation-ok).")
     for r in uncorr[:8]:
         star = " *FDR" if r.get("fdr_significant") else ""
         emg = " [EMG?]" if r["emg_prone"] else ""
