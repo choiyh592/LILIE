@@ -179,6 +179,12 @@ def _run_axis_suite(config: Config):
         print("\n[run_all] SKIP mode audit: direction_modes.json not found "
               "(did direction_modes run?).")
 
+    # Final presentation figures + captions (reads what the modules wrote; standalone-safe)
+    if _have(config, "deltas.npz") and _have(config, "phenotype_axis.csv"):
+        from . import final_figures
+        _step("Final figures (4 separate panels + captions)",
+              lambda: final_figures.main(config))
+
 
 def run(config: Config, start_from: str = "assemble") -> dict:
     _ensure_repo_on_path(config)
