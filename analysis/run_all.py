@@ -121,6 +121,15 @@ def _run_axis_suite(config: Config):
     if not _have(config, "directional_phenotype_labels.csv"):
         _step("Directional phenotyping (vMF + spherical)",
               lambda: directional_phenotype.main(config))
+
+    # Decisive salvage test: is the delta DIRECTION reproducible within a session?
+    if os.path.isdir(config.out("_ckpt")):
+        from . import delta_reliability
+        _step("Delta direction reliability (split-half)",
+              lambda: delta_reliability.main(config))
+    else:
+        print("\n[run_all] SKIP delta reliability: no fold checkpoints (run module 2).")
+
     _step("Phenotype geometry (auto-k + angle-null)",
           lambda: phenotype_geometry.main(config))
     _step("Phenotype compass (writes phenotype_axis.csv)",
