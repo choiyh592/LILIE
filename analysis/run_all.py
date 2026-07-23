@@ -11,8 +11,19 @@ Order: assemble (1) -> delta (2) -> reduce (3) == SCREE GATE.
 The gate is load-bearing (invariant 5): a rank-1 delta space never gets
 silently clustered.
 
+Downstream steps (run.downstream, list or comma-string):
+  directional  - reliable-direction vMF + spherical phenotyping
+  trajectory   - clusterability + direction x magnitude
+  axis         - the full axis-analysis suite (geometry -> compass -> qeeg ->
+                 controls -> axis_qeeg -> axis_slowing -> axis_aperiodic), each
+                 stage guarded (skips with a reason if its inputs are absent)
+  clustering   - legacy hard-clustering branch (kept, off by default)
+  qc           - psd_diagnostic (line-noise / notch check)
+  all          - directional + trajectory + axis (the one-shot for a full run)
+
 Run:  python -m analysis.run_all --config analysis/config.yaml
       python -m analysis.run_all --config analysis/config.yaml --from reduce
+For a complete new experiment set run.stop_at_gate=false and run.downstream=all.
 """
 from __future__ import annotations
 
@@ -56,13 +67,92 @@ def _resolve(config: Config, key: str, auto_default: bool) -> bool:
 
 def _downstream_steps(config: Config) -> set:
     """run.downstream may be a list, a comma-string, or a single value.
-    Legacy: "both" == trajectory + clustering."""
+    Legacy: "both" == trajectory + clustering. "all" == directional+trajectory+axis."""
     ds = config.get("run", {}).get("downstream", "directional")
     if isinstance(ds, str):
         if ds == "both":
             return {"trajectory", "clustering"}
-        return {s.strip() for s in ds.split(",") if s.strip()}
-    return set(ds)
+        steps = {s.strip() for s in ds.split(",") if s.strip()}
+    else:
+        steps = set(ds)
+    if "all" in steps:
+        steps |= {"directional", "trajectory", "axis"}
+        steps.discard("all")
+    return steps
+
+
+def _have(config: Config, fname: str) -> bool:
+    return os.path.exists(config.out(fname))
+
+
+def _have_table(config: Config, base: str) -> bool:
+    return (os.path.exists(config.out(base + ".parquet"))
+            or os.path.exists(config.out(base + ".csv")))
+
+
+def _control_available(config: Config) -> bool:
+    for k in ("control_metadata_csv", "control_embeddings_npy"):
+        p = config.get("paths", {}).get(k)
+        if not p or not os.path.exists(config.path("paths", k) or ""):
+            return False
+    return os.path.isdir(config.out("_ckpt"))
+
+
+def _step(label: str, fn) -> bool:
+    """Run a stage; a missing-input SystemExit is a SKIP, any other error is
+    logged and swallowed so one bad stage can't sink the whole run."""
+    print(f"\n=== {label} ===")
+    try:
+        fn(); return True
+    except SystemExit as e:
+        print(f"[run_all] SKIP {label}: {e}"); return False
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        print(f"[run_all] FAILED {label}: {type(e).__name__}: {e}")
+        traceback.print_exc(); return False
+
+
+def _run_axis_suite(config: Config):
+    """geometry -> compass -> qeeg -> controls -> axis_qeeg/slowing/aperiodic.
+    Each stage guarded; prints what ran and what was skipped and why."""
+    from . import directional_phenotype, phenotype_geometry, phenotype_compass
+    from . import qeeg as qeeg_mod
+
+    if not _have(config, "directional_phenotype_labels.csv"):
+        _step("Directional phenotyping (vMF + spherical)",
+              lambda: directional_phenotype.main(config))
+    _step("Phenotype geometry (auto-k + angle-null)",
+          lambda: phenotype_geometry.main(config))
+    _step("Phenotype compass (writes phenotype_axis.csv)",
+          lambda: phenotype_compass.main(config))
+
+    if _resolve(config, "run_qeeg", _raw_eeg_available(config)):
+        _step("Module 6: qeeg (connectivity + spectral)", lambda: qeeg_mod.main(config))
+    else:
+        print("\n[run_all] SKIP qeeg: no raw EEG at "
+              f"{config.path('paths', 'raw_eeg_dir')}.")
+
+    if _control_available(config):
+        from . import control_deltas, control_analysis
+        if _step("Control deltas (apply treated models to untreated)",
+                 lambda: control_deltas.main(config)):
+            _step("Control analysis (projection + magnitude test)",
+                  lambda: control_analysis.main(config))
+    else:
+        print("\n[run_all] SKIP control cohort: control metadata/embeddings or "
+              "fold checkpoints not found.")
+
+    if _have_table(config, "qeeg_connectivity") and _have(config, "phenotype_axis.csv"):
+        from . import axis_qeeg, axis_slowing_test, axis_aperiodic_test
+        _step("Axis x QEEG (pre-specified primary-family FDR)",
+              lambda: axis_qeeg.main(config))
+        _step("Axis slowing test (baseline anchor + coherence + RTM)",
+              lambda: axis_slowing_test.main(config))
+        _step("Axis aperiodic test (1/f-tilt mediation)",
+              lambda: axis_aperiodic_test.main(config))
+    else:
+        print("\n[run_all] SKIP axis-QEEG suite: need qeeg_connectivity + "
+              "phenotype_axis.csv (did qeeg and compass run?).")
 
 
 def run(config: Config, start_from: str = "assemble") -> dict:
@@ -107,6 +197,16 @@ def run(config: Config, start_from: str = "assemble") -> dict:
             from . import trajectory_eval
             print("\n=== Trajectory eval (clusterability + direction x magnitude) ===")
             trajectory_eval.main(config)
+
+        # --- Axis analysis suite (geometry -> compass -> qeeg -> axis tests) ---
+        if "axis" in steps:
+            print("\n" + "=" * 68 + "\n=== AXIS ANALYSIS SUITE ===\n" + "=" * 68)
+            _run_axis_suite(config)
+
+        # --- QC: line-noise / notch diagnostic ---
+        if "qc" in steps:
+            from . import psd_diagnostic
+            _step("PSD line-noise / notch diagnostic", lambda: psd_diagnostic.main(config))
 
         # --- Hard clustering branch (kept but disabled by default) ---
         if "clustering" in steps:
