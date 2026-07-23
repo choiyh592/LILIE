@@ -146,6 +146,9 @@ def _run_axis_suite(config: Config):
           lambda: phenotype_geometry.main(config))
     _step("Phenotype compass (writes phenotype_axis.csv; controls now available)",
           lambda: phenotype_compass.main(config))
+    from . import direction_modes
+    _step("Direction modes (are the other compass spokes real?)",
+          lambda: direction_modes.main(config))
 
     if _resolve(config, "run_qeeg", _raw_eeg_available(config)):
         _step("Module 6: qeeg (connectivity + spectral)", lambda: qeeg_mod.main(config))
