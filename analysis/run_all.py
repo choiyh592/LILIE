@@ -168,6 +168,17 @@ def _run_axis_suite(config: Config):
         print("\n[run_all] SKIP axis-QEEG suite: need qeeg_connectivity + "
               "phenotype_axis.csv (did qeeg and compass run?).")
 
+    # Mode audit runs LAST so the per-mode QEEG block can use qeeg_connectivity
+    # (if it ran); it still does the nuisance audit when QEEG is absent. Needs
+    # direction_modes.json (which clusters are geometric modes / validated axes).
+    if _have(config, "direction_modes.json"):
+        from . import mode_audit
+        _step("Mode audit (nuisance associations + per-mode QEEG distinctiveness)",
+              lambda: mode_audit.main(config))
+    else:
+        print("\n[run_all] SKIP mode audit: direction_modes.json not found "
+              "(did direction_modes run?).")
+
 
 def run(config: Config, start_from: str = "assemble") -> dict:
     _ensure_repo_on_path(config)

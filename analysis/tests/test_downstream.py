@@ -264,6 +264,155 @@ def test_spectral_features_inband_paf_and_guards():
             pass
 
 
+def _mk_modes_fixture(cfg, kind, seed=0):
+    """Build deltas.npz + directional labels + geometry for direction_modes.
+    kind='noise': isotropic directions, NO axis marked -> nothing is a mode.
+    kind='axis' : a genuine antipodal axis marked significant in geometry."""
+    from analysis.directional_phenotype import _unit
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+    rng = np.random.default_rng(seed)
+    D = 24
+    rows, pid, pat, p = [], [], [], 0
+
+    def add(v, patient):
+        nonlocal p
+        rows.append(v); pid.append(f"P{p}__a__b"); pat.append(patient); p += 1
+
+    if kind == "axis":
+        axis = _unit(rng.normal(size=(1, D)))[0]
+        for i in range(18):
+            t = rng.choice([-1, 1]) * rng.uniform(0.6, 1.0)
+            v = t * axis + 0.15 * rng.normal(size=D)
+            add(v / np.linalg.norm(v) * rng.uniform(0.8, 1.4), i % 14)
+    else:  # noise
+        for i in range(18):
+            v = rng.normal(size=D)
+            add(v / np.linalg.norm(v) * rng.uniform(0.8, 1.4), i % 14)
+    for i in range(10):                                    # low-magnitude stable core
+        add(0.15 * rng.normal(size=D), i % 14)
+
+    delta = np.array(rows); pid = np.array(pid); pat = np.array(pat)
+    norm = np.linalg.norm(delta, axis=1)
+    np.savez(cfg.out("deltas.npz"), delta=delta, progression_id=pid,
+             patient_id=pat, spread_std=np.zeros(len(delta)))
+    rel = norm >= np.percentile(norm, 50)
+    U = _unit(delta)
+    cap = int(min(10, rel.sum() - 1, D))
+    pca = PCA(n_components=cap, random_state=42).fit(U[rel])
+    r = int(max(2, min(cap, np.searchsorted(np.cumsum(pca.explained_variance_ratio_), 0.9) + 1)))
+    Xr = _unit(pca.transform(U[rel])[:, :r])
+    labs = KMeans(4, n_init=25, random_state=42).fit_predict(Xr)
+    full = np.full(len(delta), -1); full[rel] = labs
+    pd.DataFrame({"progression_id": pid, "patient_id": pat, "magnitude": norm,
+                  "spread_std": np.zeros(len(delta)), "is_reliable": rel,
+                  "vmf_label": full, "spherical_label": full}
+                 ).to_csv(cfg.out("directional_phenotype_labels.csv"), index=False)
+    io.write_json({"direction_dims": r}, cfg.out("directional_phenotype.json"))
+    cents = {c: _unit(Xr[labs == c].mean(0)[None])[0] for c in sorted(set(labs))}
+    pairs, cl = {}, sorted(cents)
+    for i in range(len(cl)):
+        for j in range(i + 1, len(cl)):
+            ang = float(np.degrees(np.arccos(np.clip(cents[cl[i]] @ cents[cl[j]], -1, 1))))
+            sig = (kind == "axis") and ang > 125            # geometry only marks a real axis
+            pairs[f"{cl[i]}-{cl[j]}"] = {"angle_deg": ang, "p_two_sided": 0.004 if sig else 0.5}
+    io.write_json({"pairwise_angles": pairs, "angle_null": {"null_mean_deg": 82.0}},
+                  cfg.out("phenotype_geometry.json"))
+
+
+def test_direction_modes_rejects_continuum_and_keeps_axis():
+    """The hardened null must NOT crown small isotropic clusters as modes, and the
+    concentration+stability gate must reject a structureless continuum outright
+    while the validated axis (via the angle-null) still survives."""
+    from analysis import direction_modes
+    with tempfile.TemporaryDirectory() as root:
+        cfg = Config(raw={"paths": {"output_dir": root}, "seed": 0,
+                          "report": {"fig_dpi": 90},
+                          "directional_phenotype": {"direction_dims": 10,
+                                                    "mode_null_perm": 200, "mode_boot": 200,
+                                                    "mode_stability_min": 0.60}},
+                     config_dir=root)
+        # (1) pure continuum: no geometric mode passes, no axis marked
+        _mk_modes_fixture(cfg, "noise", seed=1)
+        direction_modes.main(cfg)
+        j = io.read_json(cfg.out("direction_modes.json"))
+        assert j["n_geometric_modes"] == 0, j["per_direction"]
+        assert j["n_validated_axes"] == 0, j["per_direction"]
+        for d in j["per_direction"]:
+            assert not d["in_validated_axis"]
+            assert not d["is_geometric_mode"]     # concentration alone can't crown a small clump
+
+        # (2) genuine antipodal axis: the axis clusters survive via angle-null membership
+        _mk_modes_fixture(cfg, "axis", seed=2)
+        direction_modes.main(cfg)
+        j2 = io.read_json(cfg.out("direction_modes.json"))
+        assert j2["n_validated_axes"] >= 1
+        assert any(d["in_validated_axis"] and d["interpretable_as_axis"]
+                   for d in j2["per_direction"])
+
+
+def test_mode_audit_separates_nuisance_qeeg_and_axis():
+    """Each verdict path must fire: a long-dt bundle -> nuisance-linked; a bundle
+    with a distinct primary QEEG feature -> candidate; a plain small bundle ->
+    embedding-only; a validated-axis cluster -> phenotype-eligible."""
+    from analysis import mode_audit
+    with tempfile.TemporaryDirectory() as root:
+        cfg = Config(raw={"paths": {"output_dir": root}, "seed": 0,
+                          "report": {"fig_dpi": 90},
+                          "phenotype_stats": {"fdr_alpha": 0.05},
+                          "directional_phenotype": {"geometry_label": "spherical_label",
+                                                    "axis_qeeg_perm": 100}},
+                     config_dir=root)
+        rng = np.random.default_rng(0); D = 16
+        labels, pid, pat, dt, cal, p = [], [], [], [], [], 0
+
+        def add(lab, dt_v, calday, patient):
+            nonlocal p
+            labels.append(lab); pid.append(f"P{p}__a__b"); pat.append(patient)
+            dt.append(dt_v); cal.append(calday); p += 1
+        for i in range(6): add(0, rng.uniform(100, 300), rng.uniform(0, 700), 200 + i)  # axis
+        for i in range(5): add(1, rng.uniform(600, 800), rng.uniform(0, 700), 300 + i)  # long dt
+        for i in range(6): add(2, rng.uniform(100, 300), rng.uniform(0, 700), 400 + i)  # distinct qeeg
+        for i in range(3): add(3, rng.uniform(100, 300), rng.uniform(0, 700), 500 + i)  # plain small
+        for i in range(8): add(-1, rng.uniform(100, 300), rng.uniform(0, 700), 600 + i)
+        labels = np.array(labels); pid = np.array(pid); pat = np.array(pat)
+        dt = np.array(dt); cal = np.array(cal); N = len(pid)
+        delta = rng.normal(size=(N, D)) * np.where(labels >= 0, 2.5, 0.2)[:, None]
+        np.savez(cfg.out("deltas.npz"), delta=delta, progression_id=pid,
+                 patient_id=pat, dt=dt, spread_std=np.zeros(N))
+        pd.DataFrame({"progression_id": pid, "patient_id": pat,
+                      "magnitude": np.linalg.norm(delta, axis=1), "spread_std": np.zeros(N),
+                      "is_reliable": labels >= 0, "vmf_label": labels, "spherical_label": labels}
+                     ).to_csv(cfg.out("directional_phenotype_labels.csv"), index=False)
+        io.write_json({"per_direction": [
+            {"cluster": 0, "is_geometric_mode": True, "in_validated_axis": True},
+            {"cluster": 1, "is_geometric_mode": True, "in_validated_axis": False},
+            {"cluster": 2, "is_geometric_mode": True, "in_validated_axis": False},
+            {"cluster": 3, "is_geometric_mode": True, "in_validated_axis": False}]},
+            cfg.out("direction_modes.json"))
+        origin = pd.Timestamp("2024-01-01")
+        bd = [origin + pd.Timedelta(days=int(c)) for c in cal]
+        ad = [b + pd.Timedelta(days=int(d)) for b, d in zip(bd, dt)]
+        io.write_table(pd.DataFrame({"progression_id": pid, "patient_id": pat,
+                                     "before_date": bd, "after_date": ad}), cfg.out("progressions"))
+        prim = ["median_freq_global", "rel_alpha_posterior", "rel_theta_global",
+                "slowing_ratio_posterior", "alpha_cog_global", "aperiodic_exponent_global",
+                "wpli_alpha_global", "wpli_alpha_posterior", "graph_wpli_alpha_global_efficiency"]
+        qd = {"progression_id": pid, "patient_id": pat}
+        for b in prim:
+            qd[f"{b}_delta"] = rng.normal(size=N)
+        qd["rel_theta_global_delta"] = qd["rel_theta_global_delta"] + np.where(labels == 2, 3.0, 0.0)
+        io.write_table(pd.DataFrame(qd), cfg.out("qeeg_connectivity"))
+
+        mode_audit.main(cfg)
+        j = io.read_json(cfg.out("mode_audit.json"))
+        v = {r["cluster"]: r["verdict"] for r in j["per_mode"]}
+        assert v[0].startswith("phenotype-eligible")
+        assert "NUISANCE" in v[1] and "dt" in v[1]
+        assert v[2].startswith("CANDIDATE")
+        assert v[3].startswith("embedding mode only")
+
+
 def _run():
     fns = {k: v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)}
