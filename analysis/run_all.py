@@ -113,8 +113,9 @@ def _step(label: str, fn) -> bool:
 
 
 def _run_axis_suite(config: Config):
-    """geometry -> compass -> qeeg -> controls -> axis_qeeg/slowing/aperiodic.
-    Each stage guarded; prints what ran and what was skipped and why."""
+    """directional -> reliability -> controls -> geometry -> compass -> qeeg ->
+    axis_qeeg/slowing/aperiodic. Controls run BEFORE the compass so control_deltas.npz
+    exists and the compass can plot them. Each stage guarded."""
     from . import directional_phenotype, phenotype_geometry, phenotype_compass
     from . import qeeg as qeeg_mod
 
@@ -130,17 +131,7 @@ def _run_axis_suite(config: Config):
     else:
         print("\n[run_all] SKIP delta reliability: no fold checkpoints (run module 2).")
 
-    _step("Phenotype geometry (auto-k + angle-null)",
-          lambda: phenotype_geometry.main(config))
-    _step("Phenotype compass (writes phenotype_axis.csv)",
-          lambda: phenotype_compass.main(config))
-
-    if _resolve(config, "run_qeeg", _raw_eeg_available(config)):
-        _step("Module 6: qeeg (connectivity + spectral)", lambda: qeeg_mod.main(config))
-    else:
-        print("\n[run_all] SKIP qeeg: no raw EEG at "
-              f"{config.path('paths', 'raw_eeg_dir')}.")
-
+    # Controls FIRST -> control_deltas.npz available to the compass (and everything else).
     if _control_available(config):
         from . import control_deltas, control_analysis
         if _step("Control deltas (apply treated models to untreated)",
@@ -150,6 +141,17 @@ def _run_axis_suite(config: Config):
     else:
         print("\n[run_all] SKIP control cohort: control metadata/embeddings or "
               "fold checkpoints not found.")
+
+    _step("Phenotype geometry (auto-k + angle-null)",
+          lambda: phenotype_geometry.main(config))
+    _step("Phenotype compass (writes phenotype_axis.csv; controls now available)",
+          lambda: phenotype_compass.main(config))
+
+    if _resolve(config, "run_qeeg", _raw_eeg_available(config)):
+        _step("Module 6: qeeg (connectivity + spectral)", lambda: qeeg_mod.main(config))
+    else:
+        print("\n[run_all] SKIP qeeg: no raw EEG at "
+              f"{config.path('paths', 'raw_eeg_dir')}.")
 
     if _have_table(config, "qeeg_connectivity") and _have(config, "phenotype_axis.csv"):
         from . import axis_qeeg, axis_slowing_test, axis_aperiodic_test

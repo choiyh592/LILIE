@@ -137,35 +137,53 @@ def main(config: Config) -> str:
         _greyout(axB, "directional_phenotype.json missing")
     axB.set_title("(B) Directions are reliable but non-persistent", fontsize=11, loc="left")
 
-    # ---------- (C) one bipolar axis on a continuum ----------
+    # ---------- (C) the bipolar axis, as a change compass (controls included) ----------
+    # polar: radius = magnitude, colour = axis position (PC1), controls = black x in
+    # the low-magnitude core. Read colour/radius, NOT fine angle (2-D projection).
+    axC.remove()
+    axC = fig.add_subplot(2, 2, 2, projection="polar")
     if dz is not None and axis_df is not None:
-        U = _unit(dz["delta"].astype(float))
+        U = _unit(dz["delta"].astype(float)); norm = np.linalg.norm(dz["delta"].astype(float), axis=1)
         relmap = dict(zip(axis_df["progression_id"].astype(str), axis_df["is_reliable"].astype(bool)))
         rel = np.array([bool(relmap.get(p, False)) for p in pid])
         pca = PCA(n_components=2, random_state=int(config["seed"])).fit(U[rel]) if rel.sum() >= 3 else PCA(2).fit(U)
         P = pca.transform(U); evr = pca.explained_variance_ratio_
         amap = dict(zip(axis_df["progression_id"].astype(str), axis_df["axis_coord"].astype(float)))
         acoord = np.array([amap.get(p, 0.0) for p in pid])
-        if np.mean(acoord[rel] * P[rel, 0]) < 0:
-            P[:, 0] *= -1
+        flip = -1.0 if (rel.any() and np.mean(acoord[rel] * P[rel, 0]) < 0) else 1.0
+        P[:, 0] *= flip
+        ang = np.arctan2(P[:, 1], P[:, 0]); cut = float(np.min(norm[rel])) if rel.any() else float(np.median(norm))
         vext = float(np.max(np.abs(P[rel, 0]))) if rel.any() else 1.0
         dn = TwoSlopeNorm(vmin=-vext, vcenter=0, vmax=vext)
-        axC.scatter(P[~rel, 0], P[~rel, 1], s=22, color=OI["gray"], alpha=0.5, label="stable / continuum core")
-        axC.scatter(P[rel, 0], P[rel, 1], c=dcm(dn(P[rel, 0])), s=52, edgecolor="white", lw=0.5, label="reliable (colour = axis pos.)")
-        axC.axhline(0, color="#ddd", lw=0.8); axC.axvline(0, color="#ddd", lw=0.8)
+        tf = np.linspace(0, 2 * np.pi, 240)
+        for frac in np.linspace(1.0, 0.0, 6, endpoint=False):
+            axC.fill_between(tf, 0, cut * frac, color="#E9ECEF", alpha=0.2, zorder=0, lw=0)
+        axC.plot(tf, np.full_like(tf, cut), color="#9aa4ae", lw=1.1, ls=(0, (5, 4)), zorder=1)
+        axC.scatter(ang[~rel], norm[~rel], s=24, color=OI["gray"], alpha=0.7, zorder=3, label="stable / continuum core")
+        axC.scatter(ang[rel], norm[rel], c=dcm(dn(P[rel, 0])), s=58, edgecolor="white", lw=0.5,
+                    zorder=4, label="reliable (colour = axis pos.)")
+        cpath = config.out("control_deltas.npz")
+        if os.path.exists(cpath):
+            cz = np.load(cpath, allow_pickle=True)
+            cU = _unit(cz["delta"].astype(float)); cnorm = np.linalg.norm(cz["delta"].astype(float), axis=1)
+            cP = pca.transform(cU); cang = np.arctan2(cP[:, 1], cP[:, 0] * flip)
+            axC.scatter(cang, cnorm, marker="x", s=64, color=OI["black"], lw=1.8, zorder=6,
+                        label=f"control untreated (n={len(cnorm)})")
+        axC.set_rlim(0, float(norm.max()) * 1.08); axC.set_rlabel_position(112)
+        axC.set_yticks([cut]); axC.set_yticklabels([f"cut={cut:.2f}"], fontsize=7, color="#6b7580")
+        axC.tick_params(axis="x", labelsize=8); axC.grid(color="#dfe3e7", lw=0.7)
         pa = None
         if geo_j is not None:
             sig = [(k, v) for k, v in geo_j.get("pairwise_angles", {}).items() if v.get("p_two_sided", 1) < 0.05]
             pa = max(sig, key=lambda kv: kv[1]["angle_deg"])[1] if sig else None
-        cap = (f"one bipolar axis (angle-null p={pa['p_two_sided']:.3f}, borderline)\ncontinuum — not discrete phenotypes"
-               if pa else "one dominant axis (PC1); continuum — not discrete")
-        axC.text(0.03, 0.03, cap, transform=axC.transAxes, fontsize=8.5,
-                 bbox=dict(boxstyle="round", fc="#fbf7ee", ec="#e5d9bf"))
-        axC.set_xlabel(f"dir PC1 = axis ({evr[0]*100:.0f}%)"); axC.set_ylabel(f"dir PC2 ({evr[1]*100:.0f}%)")
-        axC.legend(fontsize=8, frameon=False, loc="upper right")
+        sub = (f"axis = PC1 ({evr[0]*100:.0f}%); angle-null p={pa['p_two_sided']:.3f} (borderline)\n"
+               "continuum, not discrete — read colour/radius, not fine angle"
+               if pa else f"axis = PC1 ({evr[0]*100:.0f}%); continuum, not discrete")
+        axC.legend(loc="upper left", bbox_to_anchor=(-0.16, 1.12), fontsize=7.5, frameon=False)
     else:
-        _greyout(axC, "deltas.npz / phenotype_axis.csv missing")
-    axC.set_title("(C) One bipolar axis of change, on a continuum", fontsize=11, loc="left")
+        _greyout(axC, "deltas.npz / phenotype_axis.csv missing"); sub = ""
+    axC.set_title("(C) Change compass: one bipolar axis; controls sit in the core\n" + sub,
+                  fontsize=10.5, loc="left", pad=12)
 
     # ---------- (D) baseline relative-theta anchor ----------
     fc_path = config.out("qeeg_connectivity")
@@ -198,7 +216,7 @@ def main(config: Config) -> str:
         _greyout(axD, "qeeg_connectivity missing (run module 6)")
     axD.set_title("(D) The axis is anchored to baseline relative theta", fontsize=11, loc="left")
 
-    for ax in (axA, axB, axC, axD):
+    for ax in (axA, axB, axD):                        # axC is polar - no top/right spines
         for s in ["top", "right"]:
             ax.spines[s].set_visible(False)
 
