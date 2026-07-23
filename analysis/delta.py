@@ -261,6 +261,35 @@ def _bootstrap_auc_ci(probs, labels, patients, n_boot, seed, alpha=0.05):
     return point, float(lo), float(hi)
 
 
+def _perfold_auc(probs, labels, folds):
+    """Per-fold out-of-fold AUC (each held-out fold scored separately)."""
+    from sklearn.metrics import roc_auc_score
+    aucs = {}
+    for f in np.unique(folds):
+        m = folds == f
+        if np.unique(labels[m]).size < 2:
+            continue
+        aucs[int(f)] = float(roc_auc_score(labels[m], probs[m]))
+    vals = np.array(list(aucs.values()), float)
+    mean = float(vals.mean()) if vals.size else np.nan
+    std = float(vals.std(ddof=1)) if vals.size > 1 else 0.0
+    return aucs, mean, std
+
+
+def _rank_calibrate(probs, folds):
+    """Within-fold quantile-rank transform to (0,1). Monotonic and LABEL-FREE, so
+    it preserves each fold's AUC exactly but puts all folds on a common scale, so
+    pooling no longer suffers cross-fold offset inversions. (The per-fold models are
+    trained separately and emit non-commensurate softmax scores; raw pooling of
+    those is what depresses the pooled AUC below the per-fold AUCs.)"""
+    from scipy.stats import rankdata
+    out = np.empty(len(probs), float)
+    for f in np.unique(folds):
+        m = folds == f
+        out[m] = rankdata(probs[m]) / (int(m.sum()) + 1.0)
+    return out
+
+
 def _permutation_pvalue(probs, labels, n_perm, seed):
     """One-sided permutation p-value that ordering AUC > 0.5 (retrain-free).
 
@@ -322,7 +351,7 @@ def main(config: Config) -> str:
     out_of_fold = bool(d["out_of_fold_deltas"])
 
     # 1. Train per fold; keep models + pooled ordering predictions.
-    models, all_probs, all_labels, all_pat = {}, [], [], []
+    models, all_probs, all_labels, all_pat, all_fold = {}, [], [], [], []
     for f in range(1, num_folds + 1):
         print(f"[delta] training LILIE (pool={d['pool_method']}) holding out fold {f}")
         model, probs, labels, pats = _train_fold(config, test_idx=f)
@@ -330,16 +359,34 @@ def main(config: Config) -> str:
         all_probs.append(probs)
         all_labels.append(labels)
         all_pat.append(pats)
+        all_fold.append(np.full(len(probs), f))
     all_probs = np.concatenate(all_probs)
     all_labels = np.concatenate(all_labels)
     all_pat = np.concatenate(all_pat)
+    all_fold = np.concatenate(all_fold)
     auc, lo, hi = _bootstrap_auc_ci(all_probs, all_labels, all_pat,
                                     int(d["bootstrap_ci_n"]), seed)
     _, perm_p = _permutation_pvalue(all_probs, all_labels,
                                     int(d.get("permutation_n", 1000)), seed)
+    # per-fold AUC (mean +/- std) and rank-calibrated pooled AUC: the pooled-vs-
+    # per-fold gap is cross-fold calibration, not generalization (same best-epoch
+    # held-out predictions, aggregated differently).
+    perfold, pf_mean, pf_std = _perfold_auc(all_probs, all_labels, all_fold)
+    cal = _rank_calibrate(all_probs, all_fold)
+    cauc, clo, chi = _bootstrap_auc_ci(cal, all_labels, all_pat, int(d["bootstrap_ci_n"]), seed)
+    es_on = bool(d.get("early_stopping", False))
     print(f"[delta] pooled out-of-fold ordering AUC = {auc:.3f} "
           f"[{lo:.3f}, {hi:.3f}] (95% patient-clustered bootstrap); "
           f"permutation p={perm_p:.4f}")
+    print(f"[delta] per-fold OOF AUC = {pf_mean:.3f} +/- {pf_std:.3f} "
+          f"({len(perfold)} folds: {[round(v,3) for v in perfold.values()]})")
+    print(f"[delta] rank-calibrated pooled OOF AUC = {cauc:.3f} [{clo:.3f}, {chi:.3f}] "
+          f"(within-fold rank-normalized -> removes cross-fold calibration gap)")
+    if es_on:
+        print("[delta] CAVEAT: early stopping monitors the HELD-OUT fold "
+              "(val_dataloaders=test_loader), so best-epoch selection peeks at the test "
+              "fold -> ALL these OOF AUCs are optimistically biased. For a clean estimate, "
+              "use an inner-validation split for the monitor or a fixed epoch budget.")
 
     # 2. Per-progression median segment-pair delta (out-of-fold model).
     pids, prog_ids, folds, dts = [], [], [], []
@@ -385,8 +432,18 @@ def main(config: Config) -> str:
         spread_iqr=np.array(spread_iqr),
     )
     io.write_json(
-        {"pool_method": d["pool_method"], "ordering_auc": auc,
-         "ordering_auc_ci95": [lo, hi], "ci_method": "patient_clustered_bootstrap",
+        {"pool_method": d["pool_method"],
+         "ordering_auc": auc, "ordering_auc_ci95": [lo, hi],
+         "ci_method": "patient_clustered_bootstrap",
+         "perfold_auc_mean": pf_mean, "perfold_auc_std": pf_std,
+         "perfold_auc": perfold,
+         "calibrated_pooled_auc": cauc, "calibrated_pooled_auc_ci95": [clo, chi],
+         "calibration_method": "within_fold_rank_normalization",
+         "pooled_vs_perfold_gap_is": "cross_fold_calibration (same held-out predictions)",
+         "early_stopping_monitors_test_fold": es_on,
+         "auc_optimism_note": ("early stopping monitors the held-out fold, so all OOF AUCs "
+                               "are optimistically biased by test-fold epoch selection"
+                               if es_on else "no early stopping"),
          "permutation_pvalue": perm_p, "n_patients": int(np.unique(all_pat).size),
          "n_predictions": int(all_labels.size),
          "n_progressions": int(delta_mat.shape[0]),
