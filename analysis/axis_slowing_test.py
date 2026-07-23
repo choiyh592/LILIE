@@ -78,15 +78,31 @@ EXPLORATORY = [
 
 
 def _z(a):
-    a = np.asarray(a, float); s = a.std()
-    return (a - a.mean()) / s if s > 0 else a * 0.0
+    a = np.asarray(a, float); s = np.nanstd(a)
+    return (a - np.nanmean(a)) / s if s > 0 else np.zeros_like(a)
+
+
+_NAN_FIT = {"beta": np.nan, "se": np.nan, "p": np.nan, "lo": np.nan, "hi": np.nan,
+            "method": "insufficient_finite_n"}
 
 
 def _fit(y, x, covars, groups):
     """Standardized regression of y on x controlling covars; patient-clustered SE
-    via statsmodels when available (else classical OLS fallback).
-    Returns dict(beta, se, p, lo, hi, method)."""
-    Z = np.column_stack([_z(x)] + [_z(c) for c in covars]) if covars else _z(x).reshape(-1, 1)
+    via statsmodels when available (else classical OLS fallback). Rows with any
+    non-finite value (NaN/inf) in y/x/covars are dropped first (some spectral
+    features - e.g. unresolved PAF - are legitimately NaN). Returns dict(beta, se,
+    p, lo, hi, method)."""
+    y = np.asarray(y, float); x = np.asarray(x, float)
+    cov = [np.asarray(c, float) for c in covars] if covars else []
+    groups = np.asarray(groups)
+    mask = np.isfinite(y) & np.isfinite(x)
+    for c in cov:
+        mask &= np.isfinite(c)
+    if int(mask.sum()) < max(5, len(cov) + 3):
+        return dict(_NAN_FIT)
+    y, x = y[mask], x[mask]; cov = [c[mask] for c in cov]; groups = groups[mask]
+
+    Z = np.column_stack([_z(x)] + [_z(c) for c in cov]) if cov else _z(x).reshape(-1, 1)
     try:
         import statsmodels.api as sm
         X = sm.add_constant(Z)
@@ -134,7 +150,7 @@ def main(config: Config):
 
     have = [(b, s, lab) for (b, s, lab) in PANEL if (b + "_baseline") in dft.columns]
 
-    # ---- composite baseline slowing score (sign-aligned z) ----
+    # ---- composite baseline slowing score (sign-aligned z; NaN-robust) ----
     def _sign_aligned(kind):  # kind = "baseline" | "delta"
         cols, used = [], []
         for b, s, lab in have:
@@ -142,7 +158,14 @@ def main(config: Config):
             if c in dft.columns and dft[c].notna().sum() >= 8 and dft[c].std() > 0:
                 cols.append(s * _z(dft[c].to_numpy(float))); used.append((b, s, lab))
         M = np.vstack(cols).T if cols else np.zeros((len(dft), 0))
-        comp = M.mean(1) if M.shape[1] else np.zeros(len(dft))
+        # per-row nanmean over available features -> a NaN in one feature (e.g.
+        # unresolved PAF) doesn't nuke the whole progression's composite.
+        if M.shape[1]:
+            allnan = ~np.isfinite(M).any(axis=1)
+            comp = np.where(allnan, np.nan,
+                            np.nanmean(np.where(np.isfinite(M), M, np.nan), axis=1))
+        else:
+            comp = np.zeros(len(dft))
         return comp, used
 
     comp_base, used_b = _sign_aligned("baseline")
@@ -150,7 +173,7 @@ def main(config: Config):
 
     # orient axis so that + = MORE baseline slowing (interpretability only)
     anchor_fit0 = _fit(comp_base, axis0, covars, groups)
-    orient = 1.0 if anchor_fit0["beta"] >= 0 else -1.0
+    orient = -1.0 if np.isfinite(anchor_fit0["beta"]) and anchor_fit0["beta"] < 0 else 1.0
     axis = axis0 * orient
 
     # ---- (1) BASELINE ANCHOR: each panel feature ~ axis, within-panel FDR ----
