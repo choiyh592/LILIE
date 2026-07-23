@@ -47,7 +47,7 @@ from scipy.stats import mannwhitneyu
 from .config import Config, load_config, add_arg
 from . import io
 from .phenotype_stats import benjamini_hochberg
-from .axis_qeeg import _cluster_ols, _EMG
+from .axis_qeeg import _cluster_ols, _perm_pvalue, _EMG
 
 OI = {"blue": "#0072B2", "vermillion": "#D55E00", "green": "#009E73",
       "orange": "#E69F00", "gray": "#999999", "black": "#000000"}
@@ -166,38 +166,61 @@ def main(config: Config):
             raw[c][f]["q"] = float(q[i]) if np.isfinite(q[i]) else None
 
     # ============================ per-mode QEEG =============================
-    qeeg_by_mode = {c: {"tested": 0, "n_fdr_sig": 0, "hits": [], "skipped": True} for c in clusters}
+    # Three hardenings over a naive per-mode FDR:
+    #   (a) GLOBAL BH across ALL mode x feature tests (not within-mode only) - the
+    #       honest multiplicity is #modes x #features, so a within-mode q under-
+    #       corrects by the number of modes.
+    #   (b) PATIENT-BLOCK PERMUTATION p per test - cluster-robust OLS SEs are
+    #       anti-conservative when the in-group has few patients; the permutation
+    #       is the trustworthy small-n companion.
+    #   (c) SMALL-CLUSTER GUARD - a mode with < mode_min_patients in-group patients
+    #       cannot be a 'candidate'; its OLS inference is unreliable by construction.
+    min_pat = int(dp.get("mode_min_patients", 5))
+    q_perm = int(dp.get("mode_qeeg_perm", dp.get("axis_qeeg_perm", 2000)))
+    qeeg_by_mode = {c: {"tested": 0, "n_global_sig_non_emg": 0, "hits": [], "skipped": True}
+                    for c in clusters}
     if fc is not None:
         present_primary = [c for c in primary_cols if c in fc.columns]
         dfm = base.merge(fc[["progression_id"] + present_primary], on="progression_id", how="left")
-        covars = [dfm["magnitude"].to_numpy(float), dfm["dt"].to_numpy(float)]
+        covM = [dfm["magnitude"].to_numpy(float), dfm["dt"].to_numpy(float)]
+        pats = dfm["patient_id"].to_numpy()
+        flat = []                                        # every (mode, feature) test
         for c in clusters:
             y_mem = (dfm["label"].to_numpy() == c).astype(float)
-            rows = []
             for feat in present_primary:
                 yv = dfm[feat].to_numpy(float)
-                mask = np.isfinite(yv) & np.isfinite(covars[0]) & np.isfinite(covars[1])
-                if mask.sum() < 8 or np.nanstd(yv[mask]) == 0 or y_mem[mask].sum() < 2:
-                    rows.append({"feature": feat, "beta": np.nan, "p_cluster": np.nan,
-                                 "emg_prone": bool(_EMG.search(feat))}); continue
-                beta, pcl, method = _cluster_ols(yv[mask], y_mem[mask],
-                                                  [covars[0][mask], covars[1][mask]],
-                                                  dfm["patient_id"].to_numpy()[mask])
-                rows.append({"feature": feat, "beta": float(beta), "p_cluster": float(pcl),
-                             "method": method, "emg_prone": bool(_EMG.search(feat))})
-            pv = np.array([r["p_cluster"] for r in rows], float); ok = np.isfinite(pv)
-            q = np.full(len(pv), np.nan); rej = np.zeros(len(pv), bool)
-            if ok.any():
-                rj, qq = benjamini_hochberg(pv[ok], alpha=alpha); rej[ok] = rj; q[ok] = qq
-            for i, r in enumerate(rows):
-                r["q_value"] = float(q[i]) if np.isfinite(q[i]) else None
-                r["fdr_significant"] = bool(rej[i])
-            hits = [r for r in rows if r["fdr_significant"] and not r["emg_prone"]]
-            qeeg_by_mode[c] = {"tested": int(ok.sum()), "n_fdr_sig": int(sum(rej)),
-                               "n_fdr_sig_non_emg": len(hits),
-                               "hits": [{"feature": r["feature"], "beta": r["beta"],
-                                         "q_value": r["q_value"]} for r in hits],
-                               "results": rows, "skipped": False}
+                mask = np.isfinite(yv) & np.isfinite(covM[0]) & np.isfinite(covM[1])
+                rec = {"cluster": c, "feature": feat, "beta": np.nan, "p_cluster": np.nan,
+                       "p_perm": np.nan, "emg_prone": bool(_EMG.search(feat))}
+                if mask.sum() >= 8 and np.nanstd(yv[mask]) > 0 and y_mem[mask].sum() >= 2:
+                    beta, pcl, method = _cluster_ols(yv[mask], y_mem[mask],
+                                                     [covM[0][mask], covM[1][mask]], pats[mask])
+                    rec["beta"], rec["p_cluster"], rec["method"] = float(beta), float(pcl), method
+                    rec["p_perm"] = float(_perm_pvalue(yv[mask], y_mem[mask],
+                                                       [covM[0][mask], covM[1][mask]],
+                                                       pats[mask], q_perm, seed))
+                flat.append(rec)
+        # (a) GLOBAL BH across every finite p_cluster
+        pv = np.array([r["p_cluster"] for r in flat], float); ok = np.isfinite(pv)
+        gq = np.full(len(pv), np.nan); grej = np.zeros(len(pv), bool)
+        if ok.any():
+            rj, qq = benjamini_hochberg(pv[ok], alpha=alpha); grej[ok] = rj; gq[ok] = qq
+        for i, r in enumerate(flat):
+            r["global_q"] = float(gq[i]) if np.isfinite(gq[i]) else None
+            r["global_fdr_significant"] = bool(grej[i])
+        for c in clusters:
+            rows = [r for r in flat if r["cluster"] == c]
+            # a hit must clear GLOBAL FDR, be non-EMG, AND pass the permutation
+            hits = [r for r in rows if r["global_fdr_significant"] and not r["emg_prone"]
+                    and np.isfinite(r["p_perm"]) and r["p_perm"] < alpha]
+            npat_c = int(base.loc[base["label"] == c, "patient_id"].nunique())
+            qeeg_by_mode[c] = {
+                "tested": int(sum(np.isfinite(r["p_cluster"]) for r in rows)),
+                "n_global_sig_non_emg": len(hits),
+                "inference_reliable": bool(npat_c >= min_pat),
+                "hits": [{"feature": r["feature"], "beta": r["beta"],
+                          "global_q": r["global_q"], "p_perm": r["p_perm"]} for r in hits],
+                "results": rows, "skipped": False}
 
     # ============================ per-mode verdict =========================
     rows_out = []
@@ -209,16 +232,20 @@ def main(config: Config):
         is_geom = bool(info.get("is_geometric_mode", False))
         nuis_hit = [f for f in nuis_factors if (raw[c][f].get("q") is not None and raw[c][f]["q"] < alpha)]
         q = qeeg_by_mode[c]
-        qeeg_distinct = (not q["skipped"]) and q.get("n_fdr_sig_non_emg", 0) >= 1
+        reliable = q.get("inference_reliable", npat >= min_pat)
+        qeeg_distinct = (not q["skipped"]) and q.get("n_global_sig_non_emg", 0) >= 1
         if in_axis:
             verdict = "phenotype-eligible (validated angle-null axis) - interpret via axis_qeeg"
         elif nuis_hit:
             verdict = f"likely NUISANCE-linked ({'/'.join(nuis_hit)}) - embedding sub-structure, not a phenotype"
-        elif qeeg_distinct:
-            verdict = "CANDIDATE phenotype (distinct primary QEEG, non-EMG) - verify with more n"
+        elif qeeg_distinct and reliable:
+            verdict = "CANDIDATE phenotype (distinct QEEG survives GLOBAL FDR + permutation) - verify with more n"
+        elif qeeg_distinct and not reliable:
+            verdict = (f"weak lead - QEEG hit but inference UNRELIABLE (only {npat} in-group patients "
+                       f"< {min_pat}; cluster-robust SEs anti-conservative)")
         elif is_geom:
-            verdict = (f"embedding mode only - tight & reproducible but no distinct primary QEEG"
-                       f"{' (UNDERPOWERED: n=%d/%d patients)' % (n, npat) if npat < 5 else ''}")
+            verdict = (f"embedding mode only - tight & reproducible but no distinct QEEG after GLOBAL "
+                       f"FDR{' (UNDERPOWERED: n=%d/%d patients)' % (n, npat) if npat < min_pat else ''}")
         else:
             verdict = "continuum / projection (not a geometric mode)"
         rows_out.append({
@@ -230,8 +257,9 @@ def main(config: Config):
             "cal_effect": raw[c].get("cal_day", {}).get("effect_rbc") if have_dates else None,
             "cal_q": raw[c].get("cal_day", {}).get("q") if have_dates else None,
             "cal_compactness": raw[c].get("cal_compactness") if have_dates else None,
-            "qeeg_primary_tested": q["tested"], "qeeg_n_fdr_sig": q["n_fdr_sig"],
-            "qeeg_n_fdr_sig_non_emg": q.get("n_fdr_sig_non_emg", 0),
+            "qeeg_primary_tested": q["tested"],
+            "qeeg_n_global_sig_non_emg": q.get("n_global_sig_non_emg", 0),
+            "qeeg_inference_reliable": q.get("inference_reliable", npat >= min_pat),
             "qeeg_hits": q.get("hits", []),
             "verdict": verdict})
 
@@ -264,30 +292,34 @@ def main(config: Config):
 
     # (B) per-mode primary QEEG distinctiveness + verdict colour
     xs = np.arange(len(order))
-    nsig = [qeeg_by_mode[c].get("n_fdr_sig_non_emg", 0) for c in order]
+    nsig = [qeeg_by_mode[c].get("n_global_sig_non_emg", 0) for c in order]
     def _vcol(c):
         v = next(r["verdict"] for r in rows_out if r["cluster"] == c)
         if v.startswith("phenotype-eligible"): return OI["blue"]
         if "NUISANCE" in v: return OI["orange"]
         if v.startswith("CANDIDATE"): return OI["green"]
+        if v.startswith("weak lead"): return OI["vermillion"]
         return OI["gray"]
     axB.bar(xs, nsig, color=[_vcol(c) for c in order], edgecolor="white", zorder=3)
     for i, c in enumerate(order):
         r = next(r for r in rows_out if r["cluster"] == c)
         axB.text(i, nsig[i] + 0.05, f"c{c}\nn={r['n']}/{r['n_patients']}p", ha="center", fontsize=8)
     axB.set_xticks(xs); axB.set_xticklabels([f"c{c}" for c in order], fontsize=9)
-    axB.set_ylabel("# primary QEEG features distinct (non-EMG, FDR)")
+    axB.set_ylabel("# primary QEEG features distinct (non-EMG, GLOBAL FDR + perm)")
     axB.set_ylim(0, max(1.0, (max(nsig) if nsig else 0) + 1))
-    axB.set_title("(B) Distinct QEEG per mode  "
-                  "(blue=axis, green=candidate, orange=nuisance, grey=embedding-only)", fontsize=9.5)
+    axB.set_title("(B) Distinct QEEG per mode (global FDR across all mode×feature + permutation)\n"
+                  "blue=axis, green=candidate, red=weak lead (unreliable n), orange=nuisance, grey=none",
+                  fontsize=8.8)
     for s in ["top", "right"]:
         axB.spines[s].set_visible(False)
     if fc is None:
         axB.text(0.5, 0.5, "qeeg_connectivity not found\n(run module 6)", transform=axB.transAxes,
                  ha="center", va="center", color=OI["gray"])
 
-    fig.suptitle(f"Mode audit: {n_axis} validated axis, {n_candidate} candidate phenotype(s), "
-                 f"{n_nuisance} nuisance-linked, rest embedding-only", fontsize=12, y=1.0)
+    n_weak = sum(1 for r in rows_out if r["verdict"].startswith("weak lead"))
+    fig.suptitle(f"Mode audit: {n_axis} validated axis, {n_candidate} candidate phenotype(s) "
+                 f"(global FDR + perm), {n_weak} weak lead(s), {n_nuisance} nuisance-linked, "
+                 f"rest embedding-only", fontsize=11, y=1.0)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     out_png = config.out("mode_audit.png")
     fig.savefig(out_png, dpi=dpi, bbox_inches="tight"); plt.close(fig)
@@ -299,24 +331,32 @@ def main(config: Config):
         "n_nuisance_linked": n_nuisance, "have_dates": bool(have_dates),
         "qeeg_available": fc is not None, "fdr_alpha": alpha,
         "primary_family": [c for c in primary_cols if fc is None or c in (fc.columns if fc is not None else [])],
+        "min_patients_for_reliable_inference": int(dp.get("mode_min_patients", 5)),
+        "qeeg_perms": int(dp.get("mode_qeeg_perm", dp.get("axis_qeeg_perm", 2000))),
         "note": "Two gates per geometric mode. (1) NUISANCE: Mann-Whitney mode-vs-rest on dt, "
                 "magnitude and calendar time (rank-biserial effect; BH-FDR across modes). A "
                 "significant hit means the bundle IS that confound -> embedding artifact, not a "
-                "phenotype. (2) QEEG: same pre-specified primary family and patient-clustered "
-                "cluster-robust OLS as axis_qeeg, membership as regressor, magnitude+dt controlled, "
-                "BH-FDR within the family. A phenotype claim needs distinct non-EMG QEEG AND no "
-                "nuisance link AND adequate n. Small-n modes are underpowered - absence of a QEEG "
-                "signature there is not proof of absence, so such modes are reported as embedding "
-                "sub-structure, never as phenotypes.",
+                "phenotype. (2) QEEG: pre-specified primary family, patient-clustered cluster-robust "
+                "OLS (membership as regressor, magnitude+dt controlled). Multiplicity is corrected by "
+                "a GLOBAL BH across ALL mode x feature tests (NOT within-mode - that under-corrects by "
+                "the number of modes), and every hit must additionally pass a PATIENT-BLOCK "
+                "PERMUTATION (cluster-robust SEs are anti-conservative at small n). A mode with fewer "
+                "than min_patients_for_reliable_inference in-group patients cannot be a candidate - "
+                "its inference is unreliable by construction and a QEEG hit there is a 'weak lead' at "
+                "most. A phenotype claim needs distinct non-EMG QEEG surviving global FDR + permutation "
+                "AND no nuisance link AND adequate n. Absence at small n is not proof of absence.",
         "per_mode": rows_out,
     }, config.out("mode_audit.json"))
 
+    n_weak = sum(1 for r in rows_out if r["verdict"].startswith("weak lead"))
     print(f"[mode_audit] {len(clusters)} modes: {n_axis} axis, {n_candidate} candidate, "
-          f"{n_nuisance} nuisance-linked, dates={have_dates}, qeeg={'yes' if fc is not None else 'no'}.")
+          f"{n_weak} weak-lead, {n_nuisance} nuisance-linked, dates={have_dates}, "
+          f"qeeg={'yes' if fc is not None else 'no'}.")
     for r in rows_out:
         print(f"[mode_audit]   c{r['cluster']} n={r['n']}/{r['n_patients']}p "
               f"dt={r['dt_effect']:+.2f}(q={r['dt_q']}) mag={r['magnitude_effect']:+.2f}(q={r['magnitude_q']}) "
-              f"qeeg_sig={r['qeeg_n_fdr_sig_non_emg']} -> {r['verdict']}")
+              f"qeeg_glob_sig={r['qeeg_n_global_sig_non_emg']} reliable={r['qeeg_inference_reliable']} "
+              f"-> {r['verdict']}")
     print(f"[mode_audit] wrote mode_audit.{{json,csv,png}} to {config.output_dir}")
     return out_png
 
