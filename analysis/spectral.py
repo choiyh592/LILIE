@@ -120,21 +120,21 @@ def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx,
     # aperiodic fit FIRST (reused by PAF flattening)
     exp_, off_ = _aperiodic(f, P)
 
-    # alpha centre-of-gravity (primary) + aperiodic-flattened PAF (secondary)
+    # alpha centre-of-gravity (primary) + aperiodic-flattened PAF (secondary).
+    # ALWAYS emit these keys (NaN when unresolved) so every session has an IDENTICAL
+    # feature set -> the fa-fb delta never hits a KeyError.
     am = (f >= bands["alpha"][0]) & (f <= bands["alpha"][1])
+    cog = np.full(P.shape[0], np.nan)
+    paf = np.full(P.shape[0], np.nan)
     if am.any():
         fa = f[am]
         Pa = P[:, am]
         cog = (fa[None, :] * Pa).sum(1) / (Pa.sum(1) + 1e-30)          # [C]
-        feats["alpha_cog_global"] = float(cog.mean())
-        if post_idx:
-            feats["alpha_cog_posterior"] = float(cog[post_idx].mean())
         # flattened peak: subtract aperiodic fit, peak-pick residual. Accept only a
         # PROMINENT interior peak (height > peak_sd * in-band residual SD), else NaN,
         # so channels without a resolvable alpha peak do not return a spurious bin.
         peak_sd = 2.5
         lf_all = np.log10(np.where(f > 0, f, np.nan))
-        paf = np.full(P.shape[0], np.nan)
         for c in range(P.shape[0]):
             if not np.isfinite(exp_[c]):
                 continue
@@ -148,11 +148,17 @@ def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx,
             if ra[j] < peak_sd * band_sd:                            # not prominent -> unresolved
                 continue
             paf[c] = fa[j]
-        feats["paf_nan_frac_global"] = float(np.mean(~np.isfinite(paf)))
-        if np.isfinite(paf).any():
-            feats["paf_global"] = float(np.nanmean(paf))
-            if post_idx and np.isfinite(paf[post_idx]).any():
-                feats["paf_posterior"] = float(np.nanmean(paf[post_idx]))
+
+    def _nm(x, idx=None):
+        v = x if idx is None else x[idx]
+        return float(np.nanmean(v)) if np.isfinite(v).any() else float("nan")
+
+    feats["alpha_cog_global"] = _nm(cog)
+    feats["paf_global"] = _nm(paf)
+    feats["paf_nan_frac_global"] = float(np.mean(~np.isfinite(paf)))
+    if post_idx:
+        feats["alpha_cog_posterior"] = _nm(cog, post_idx)
+        feats["paf_posterior"] = _nm(paf, post_idx)
 
     # median freq, SEF95, spectral entropy -- WITHIN analysis band
     csum = np.cumsum(Pb, axis=1) / (Pb.sum(axis=1, keepdims=True) + 1e-20)
@@ -162,10 +168,10 @@ def spectral_features(eeg: np.ndarray, fs: float, bands: dict, post_idx,
     ent = -np.sum(Pn * np.log(Pn + 1e-20), axis=1) / np.log(Pb.shape[1])
     feats["spectral_entropy_global"] = float(ent.mean())
 
-    # aperiodic (1/f) exponent + offset - the spectral-tilt / E-I-proxy component
-    if np.isfinite(exp_).any():
-        feats["aperiodic_exponent_global"] = float(np.nanmean(exp_))
-        feats["aperiodic_offset_global"] = float(np.nanmean(off_))
-        if post_idx:
-            feats["aperiodic_exponent_posterior"] = float(np.nanmean(exp_[post_idx]))
+    # aperiodic (1/f) exponent + offset - the spectral-tilt / E-I-proxy component.
+    # Always emitted (NaN if the fit failed) for feature-set consistency.
+    feats["aperiodic_exponent_global"] = _nm(exp_)
+    feats["aperiodic_offset_global"] = _nm(off_)
+    if post_idx:
+        feats["aperiodic_exponent_posterior"] = _nm(exp_, post_idx)
     return feats

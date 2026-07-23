@@ -144,9 +144,10 @@ def main(config: Config):
             skipped.append((r["progression_id"], str(e)))
             continue
         row = {"progression_id": r["progression_id"], "patient_id": int(r["patient_id"])}
-        for name in fb:
-            row[f"{name}_baseline"] = fb[name]
-            row[f"{name}_delta"] = fa[name] - fb[name]
+        for name in sorted(set(fb) | set(fa)):          # union + .get: never KeyError
+            b, a = fb.get(name, np.nan), fa.get(name, np.nan)
+            row[f"{name}_baseline"] = b
+            row[f"{name}_delta"] = a - b
         rows.append(row)
 
     if skipped:
