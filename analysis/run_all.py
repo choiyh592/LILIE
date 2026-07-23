@@ -185,6 +185,11 @@ def _run_axis_suite(config: Config):
         _step("Final figures (4 separate panels + captions)",
               lambda: final_figures.main(config))
 
+    if _have(config, "ordering_auc.json"):
+        from . import final_auc_explain
+        _step("AUROC figures (per-fold + honest OOF) + example CAM",
+              lambda: final_auc_explain.main(config, None))
+
 
 def run(config: Config, start_from: str = "assemble") -> dict:
     _ensure_repo_on_path(config)

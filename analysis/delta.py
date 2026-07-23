@@ -375,6 +375,11 @@ def main(config: Config) -> str:
     cal = _rank_calibrate(all_probs, all_fold)
     cauc, clo, chi = _bootstrap_auc_ci(cal, all_labels, all_pat, int(d["bootstrap_ci_n"]), seed)
     es_on = bool(d.get("early_stopping", False))
+    # Persist the RAW held-out predictions so the AUROC can be drawn honestly (per-fold
+    # and pooled ROC curves), not just summarized as a scalar. Nothing hidden.
+    np.savez(config.out("ordering_predictions.npz"),
+             prob=all_probs, prob_calibrated=cal, label=all_labels,
+             patient=all_pat, fold=all_fold)
     print(f"[delta] pooled out-of-fold ordering AUC = {auc:.3f} "
           f"[{lo:.3f}, {hi:.3f}] (95% patient-clustered bootstrap); "
           f"permutation p={perm_p:.4f}")
